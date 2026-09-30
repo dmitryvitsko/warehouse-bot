@@ -8,8 +8,9 @@ public class WriteOffSession {
     public double quantity;         // Сколько списывает
     public boolean isPaidReceipt;   // true = По квитанции, false = Без квитанции
     public String receiptNumber;    // Номер квитанции
-    public String phoneNumber;      // Номер телефона, на который оформлена заявка
+    public String phoneNumber;      // Номер телефона заявки
     public String contractNumber;   // Номер договора
     public String address;          // Адрес абонента
+    public String closingCode;      // Код закрытия заявки (212, 227, 215, 226, 214, 217)
     public String reason;           // Причина (если без квитанции)
 }

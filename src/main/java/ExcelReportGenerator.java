@@ -61,12 +61,12 @@ public class ExcelReportGenerator {
             // ЛИСТ 2: Списания БЕЗ КВИТАНЦИИ (Технический расход / крысы / износ)
             // =========================================================================
             Sheet sheetFree = workbook.createSheet("2. Без квитанций (Тех.расход)");
-            String[] colsFree = {"Дата", "ФИО Мастера", "Код", "Материал", "Кол-во", "Ед.", "Телефон заявки", "№ Договора", "Адрес", "Причина списания"};
+            String[] colsFree = {"Дата", "ФИО Мастера", "Код", "Материал", "Кол-во", "Ед.", "Код закрытия", "Телефон заявки", "№ Договора", "Адрес", "Причина списания"};
             createHeader(sheetFree, colsFree, headerStyle);
 
             ResultSet rsFree = stmt.executeQuery("""
                 SELECT datetime(t.created_at, 'localtime') as dt, u.full_name, m.code, m.name,
-                       t.quantity, m.work_unit, t.phone_number, t.contract_number, t.subscriber_address, t.write_off_reason
+                       t.quantity, m.work_unit, t.closing_code, t.phone_number, t.contract_number, t.subscriber_address, t.write_off_reason
                 FROM transactions t
                 JOIN users u ON t.user_id = u.id
                 JOIN materials m ON t.material_id = m.id
@@ -83,10 +83,11 @@ public class ExcelReportGenerator {
                 row.createCell(3).setCellValue(rsFree.getString("name"));
                 row.createCell(4).setCellValue(rsFree.getDouble("quantity"));
                 row.createCell(5).setCellValue(rsFree.getString("work_unit"));
-                row.createCell(6).setCellValue(rsFree.getString("phone_number"));
-                row.createCell(7).setCellValue(rsFree.getString("contract_number"));
-                row.createCell(8).setCellValue(rsFree.getString("subscriber_address"));
-                row.createCell(9).setCellValue(rsFree.getString("write_off_reason"));
+                row.createCell(6).setCellValue(rsFree.getString("closing_code"));
+                row.createCell(7).setCellValue(rsFree.getString("phone_number"));
+                row.createCell(8).setCellValue(rsFree.getString("contract_number"));
+                row.createCell(9).setCellValue(rsFree.getString("subscriber_address"));
+                row.createCell(10).setCellValue(rsFree.getString("write_off_reason"));
             }
             autoSizeColumns(sheetFree, colsFree.length);
 

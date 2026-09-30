@@ -76,9 +76,12 @@ public class DatabaseManager {
                 );
             """);
 
-            // Автоматически добавляем колонку phone_number, если ее еще не было в таблице
             try {
                 stmt.execute("ALTER TABLE transactions ADD COLUMN phone_number TEXT;");
+            } catch (SQLException ignored) {}
+
+            try {
+                stmt.execute("ALTER TABLE transactions ADD COLUMN closing_code TEXT;");
             } catch (SQLException ignored) {}
 
             // 5. Таблица-шпаргалка со стоимостью услуг для квитанций
@@ -361,7 +364,7 @@ public class DatabaseManager {
         return list;
     }
 
-    // Проведение списания в базе данных (с отдельным номером телефона заявки)
+    // Проведение списания в базе данных (с кодом закрытия заявки)
     public static String completeWriteOff(long userId, WriteOffSession s) {
         try (Connection conn = getConnection()) {
             conn.setAutoCommit(false);
@@ -384,13 +387,14 @@ public class DatabaseManager {
             psUpdate.setInt(3, s.materialId);
             psUpdate.executeUpdate();
 
-            // 2. Записываем в таблицу транзакций со всеми деталями (включая phone_number)
+            // 2. Записываем в таблицу транзакций со всеми деталями (включая closing_code)
             double totalSumVat = Math.round(s.quantity * s.priceWithVat * 100.0) / 100.0;
             PreparedStatement psLog = conn.prepareStatement("""
                 INSERT INTO transactions (
                     type, user_id, material_id, quantity, is_paid_receipt,
-                    receipt_number, phone_number, contract_number, subscriber_address, write_off_reason, total_sum_with_vat
-                ) VALUES ('WRITE_OFF', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    receipt_number, phone_number, contract_number, subscriber_address,
+                    closing_code, write_off_reason, total_sum_with_vat
+                ) VALUES ('WRITE_OFF', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """);
             psLog.setLong(1, userId);
             psLog.setInt(2, s.materialId);
@@ -400,8 +404,9 @@ public class DatabaseManager {
             psLog.setString(6, s.phoneNumber);
             psLog.setString(7, s.contractNumber);
             psLog.setString(8, s.address);
-            psLog.setString(9, s.reason);
-            psLog.setDouble(10, totalSumVat);
+            psLog.setString(9, s.closingCode);
+            psLog.setString(10, s.reason);
+            psLog.setDouble(11, totalSumVat);
             psLog.executeUpdate();
 
             conn.commit();
@@ -426,16 +431,69 @@ public class DatabaseManager {
                         ✅ <b>Техническое списание (БЕЗ квитанции) сохранено!</b>
                         
                         📦 Материал: <b>%s — %.0f %s</b>
+                        🔢 Код закрытия: <b>%s</b>
                         ☎️ Телефон заявки: <b>%s</b>
                         📄 Номер договора: <b>%s</b>
                         🏠 Адрес: <b>%s</b>
                         🛠 Причина: <b>%s</b>""",
                         s.materialName, s.quantity, s.unit,
-                        s.phoneNumber, s.contractNumber, s.address, s.reason);
+                        s.closingCode, s.phoneNumber, s.contractNumber, s.address, s.reason);
             }
         } catch (SQLException e) {
             e.printStackTrace();
             return "❌ Ошибка базы данных при сохранении списания.";
         }
+    }
+    // Проверка: не закрывали ли уже по этому телефону/договору заявку кодом 212 за последние 6 месяцев
+    public static String checkCode212History(String phone, String contract) {
+        try (Connection conn = getConnection();
+             PreparedStatement ps = conn.prepareStatement("""
+                 SELECT date(created_at, 'localtime') as dt, subscriber_address
+                 FROM transactions
+                 WHERE type = 'WRITE_OFF'
+                   AND closing_code = '212'
+                   AND created_at >= datetime('now', '-6 months')
+                   AND (phone_number = ? OR (contract_number = ? AND contract_number != '-'))
+                 ORDER BY created_at DESC LIMIT 1
+             """)) {
+            ps.setString(1, phone.trim());
+            ps.setString(2, contract.trim());
+            ResultSet rs = ps.executeQuery();
+            if (rs.next()) {
+                return String.format("\n\n⚠️ <b>ВНИМАНИЕ! По этому абоненту уже был использован код 212 (%s, адрес: %s)!</b>\nНе прошло 6 месяцев — <b>код 212 использовать НЕЛЬЗЯ</b>, выбирайте код <b>227</b>!",
+                        rs.getString("dt"), rs.getString("subscriber_address"));
+            }
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
+        return "";
+    }
+
+    // Текст шпаргалки по кодам закрытия заявок (без символа <, чтобы не ломать HTML)
+    public static String getClosingCodesText() {
+        return """
+                🔢 <b>Шпаргалка по кодам закрытия заявок:</b>
+                
+                📍 <b>Участок ОРК ↔ ОРА (от коробки до розетки абонента):</b>
+                
+                • <b>Код 212</b> — Работы на участке от ОРК до ОРА <b>со списанием материалов</b>: перемонтаж ВОК-1 на ОРК или на участке, замена ВОК-1 от ОРК до ОРА, монтаж короба с дюбелями.
+                <i>❌ Не используется для работ внутри квартиры/офиса (там списание идет по квитанции).</i>
+                ⚠️ <b>ОСТОРОЖНО (повторность 6 мес.):</b> Нельзя закрывать заявку кодом 212 повторно в течение 6 месяцев по одному абоненту! Если с прошлого кода 212 не прошло полгода — используйте код <b>227</b>.
+                
+                • <b>Код 227</b> — Выправление положения волокна, устранение загиба (увеличенного затухания) без списания материала.
+                ✅ <b>Безопасный код:</b> НЕ является повторным! Можно смело использовать каждый раз (в том числе если менее 6 мес. назад уже был код 212).
+                
+                📍 <b>Работы в ОРШ (оптический распределительный шкаф):</b>
+                
+                • <b>Код 215</b> — Устранение повреждения в ОРШ <b>без материалов</b>: выправление положения оптического пигтейла или волокна в ОРШ, улучшившее сигнал.
+                
+                • <b>Код 226</b> — Устранение повреждения в ОРШ <b>с использованием материалов</b>: замена пигтейла, замена оптического адаптера в ОРШ и др.
+                
+                📍 <b>Участок ОРШ ↔ ОРК (райзер-кабель):</b>
+                
+                • <b>Код 214</b> — Ремонт или замена райзер-кабеля на участке ОРШ–ОРК, вставка участка райзер-кабеля с муфтами (любая работа с материалами по ремонту райзера).
+                
+                • <b>Код 217</b> — Переход на свободный запасной модуль и волокно в райзер-кабеле на участке ОРШ–ОРК (например, крыса повредила рабочий модуль, разварили свободный модуль на ОРК и ОРШ, из материалов — только гильзы КДЗС).
+                """;
     }
 }

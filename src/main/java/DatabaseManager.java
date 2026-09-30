@@ -46,31 +46,35 @@ public class DatabaseManager {
                 );
             """);
 
-            // 2. Таблица материалов
+            // 2. Таблица материалов на складе (с поддержкой конвертации единиц)
             stmt.execute("""
                 CREATE TABLE IF NOT EXISTS materials (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    account TEXT DEFAULT '10.01',
-                    code TEXT NOT NULL,
+                    account_number TEXT NOT NULL,
+                    code TEXT UNIQUE NOT NULL,
                     name TEXT NOT NULL,
-                    short_name TEXT NOT NULL,
-                    acc_unit TEXT NOT NULL,
+                    original_unit TEXT NOT NULL,
                     work_unit TEXT NOT NULL,
-                    batch_date TEXT DEFAULT '',
-                    conversion_factor REAL DEFAULT 1.0,
-                    price_no_vat REAL NOT NULL,
+                    conv_factor REAL DEFAULT 1.0,
                     price_with_vat REAL NOT NULL,
+                    warehouse_qty REAL NOT NULL,
+                    batch_info TEXT,
                     start_qty REAL DEFAULT 0.0,
                     start_sum REAL DEFAULT 0.0,
                     in_qty REAL DEFAULT 0.0,
                     out_qty REAL DEFAULT 0.0,
-                    warehouse_qty REAL DEFAULT 0.0,
                     end_sum REAL DEFAULT 0.0
                 );
             """);
 
-            // Если в старой базе таблица materials имела ограничение UNIQUE на code, пересоздаем её без потери структуры
-            migrateMaterialsTableIfNeeded(conn);
+            // Безопасное добавление новых колонок для конвертера (если их еще нет)
+            try {
+                stmt.execute("ALTER TABLE materials ADD COLUMN original_unit TEXT DEFAULT 'шт';");
+                stmt.execute("ALTER TABLE materials ADD COLUMN work_unit TEXT DEFAULT 'шт';");
+                stmt.execute("ALTER TABLE materials ADD COLUMN conv_factor REAL DEFAULT 1.0;");
+            } catch (SQLException ignored) {
+                // Колонки уже добавлены, всё в порядке
+            }
 
             // 3. Таблица подотчета мастеров
             stmt.execute("""
@@ -121,12 +125,60 @@ public class DatabaseManager {
             stmt.execute("""
                 CREATE TABLE IF NOT EXISTS service_tariffs (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    category TEXT NOT NULL,
                     service_name TEXT NOT NULL,
                     unit TEXT NOT NULL,
-                    price_with_vat REAL NOT NULL
+                    price_with_vat REAL NOT NULL,
+                    is_single INTEGER DEFAULT 0
                 );
             """);
+
+
+            // Умная проверка: если таблица пустая ИЛИ все цены равны нулю, заполняем правильным прайсом
+            ResultSet rsTariffs = stmt.executeQuery("SELECT SUM(price_with_vat) FROM service_tariffs");
+            if (!rsTariffs.next() || rsTariffs.getDouble(1) == 0) {
+                stmt.execute("DELETE FROM service_tariffs;");
+
+                String[] defaultServices = {
+                        "Вызов мастера;за услугу;1;10.80",
+                        "Восстановление доступа в интернет;за услугу;1;15.60",
+                        "Установка/замена медной розетки;за услугу;1;11.58",
+                        "Установка/замена ОРА;за услугу;1;19.20",
+                        "Перенос ОРА;за услугу;1;32.76",
+                        "Замена шнура на удлиненный;за услугу;1;10.20",
+                        "Замена проводки ТРП (целиком);за услугу;1;0.00",
+                        "Замена кабеля ЮТП (целиком);за услугу;1;11.22",
+                        "Замена оптической проводки (целиком);за услугу;1;23.94",
+                        "Обжатие ЮТП (с 1 стороны);за услугу;0;4.32",
+                        "Установка фаст-коннектора (оптика);за услугу;0;10.20",
+                        "Сварка оптики (пигтейл);за услугу;0;15.72",
+                        "Мех. соединение оптики (пигтейл);за услугу;0;11.64",
+                        "Пробивка отверстия в стене;за отверстие;0;9.96",
+                        "Крепление оборудования к стене;за устройство;0;3.90",
+                        "Демонтаж медной проводки;за 1 метр;0;0.60",
+                        "Демонтаж оптики;за 1 метр;0;1.32",
+                        "Монтаж кабель-канала (короба);за 1 метр;0;3.12",
+                        "Прокладка ТРП открыто;за 1 метр;0;0.00",
+                        "Прокладка ЮТП по стене скобами;за 1 метр;0;4.98",
+                        "Прокладка ЮТП по дер. плинтусу;за 1 метр;0;3.72",
+                        "Прокладка ЮТП в кабель-канал;за 1 метр;0;4.20",
+                        "Прокладка ЮТП в пласт. плинтус;за 1 метр;0;3.78",
+                        "Прокладка ЮТП в трубу/металлорукав;за 1 метр;0;4.38",
+                        "Прокладка оптики в кабель-канал;за 1 метр;0;4.74",
+                        "Прокладка оптики в пласт. плинтус;за 1 метр;0;4.32",
+                        "Прокладка оптики в трубу/металлорукав;за 1 метр;0;5.22"
+                };
+
+                try (PreparedStatement ps = conn.prepareStatement("INSERT INTO service_tariffs (service_name, unit, is_single, price_with_vat) VALUES (?, ?, ?, ?)")) {
+                    for (String s : defaultServices) {
+                        String[] parts = s.split(";");
+                        ps.setString(1, parts[0]);
+                        ps.setString(2, parts[1]);
+                        ps.setInt(3, Integer.parseInt(parts[2]));
+                        ps.setDouble(4, Double.parseDouble(parts[3]));
+                        ps.executeUpdate();
+                    }
+                }
+            }
 
             // 6. Таблицы для графиков работы
             stmt.execute("""
@@ -150,54 +202,6 @@ public class DatabaseManager {
                 );
             """);
 
-            ResultSet rs = stmt.executeQuery("SELECT COUNT(*) FROM service_tariffs");
-            if (rs.next() && rs.getInt(1) < 30) {
-                stmt.execute("DELETE FROM service_tariffs;");
-                stmt.execute("""
-                    INSERT INTO service_tariffs (category, service_name, unit, price_with_vat) VALUES
-                    ('1. Розетки, шнуры и общие работы', 'п.1 Замена или установка абонентской розетки (кроме оптической)', 'за услугу', 11.58),
-                    ('1. Розетки, шнуры и общие работы', 'п.2 Замена или установка оптической розетки абонентской (ОРА)', 'за услугу', 19.20),
-                    ('1. Розетки, шнуры и общие работы', 'п.5 Замена стандартного линейного шнура или замена на удлиненный', 'за услугу', 10.20),
-                    ('1. Розетки, шнуры и общие работы', 'п.8 Перенос абонентской розетки (в т.ч. оптической)', 'за услугу', 32.76),
-                    ('1. Розетки, шнуры и общие работы', 'п.13 Пробивка сквозных отверстий сквозь стены (перекрытия)', 'за 1 отв.', 9.96),
-                    ('1. Розетки, шнуры и общие работы', 'п.14 Крепление оконечных абон. устройств на шурупах к твердой поверхн.', 'за услугу', 3.90),
-                    ('1. Розетки, шнуры и общие работы', 'п.15 Вызов представителя предприятия для выполнения доп. работ', 'за услугу', 10.80),
-
-                    ('2. Демонтаж (п. 3)', 'п.3.1 Демонтаж абонентской проводки (медным кабелем)', 'за 1 м', 0.60),
-                    ('2. Демонтаж (п. 3)', 'п.3.2 Демонтаж кабеля ВОК-1 без закладных устройств', 'за 1 м', 1.32),
-                    ('2. Демонтаж (п. 3)', 'п.3.3 Демонтаж пласт. коробов, металлорукавов, ПВХ труб, лотков с крышкой (вкл. демонтаж кабеля)', 'за 1 м', 2.52),
-
-                    ('3. Монтаж закладных устройств (п. 4)', 'п.4.1 Монтаж пластиковых коробов', 'за 1 м', 3.12),
-                    ('3. Монтаж закладных устройств (п. 4)', 'п.4.2 Монтаж поливинилхлоридных (ПВХ) труб', 'за 1 м', 5.76),
-                    ('3. Монтаж закладных устройств (п. 4)', 'п.4.3 Монтаж металлорукавов', 'за 1 м', 7.26),
-                    ('3. Монтаж закладных устройств (п. 4)', 'п.4.4 Монтаж неперфорированных лотков', 'за 1 м', 4.56),
-
-                    ('4. Кабель «витая пара» КВП (п. 6, 7, 12)', 'п.6 Замена абонентской проводки кабелем «витая пара» (КВП)', 'за услугу', 11.22),
-                    ('4. Кабель «витая пара» КВП (п. 6, 7, 12)', 'п.7.1 Прокладка КВП кат. 5е по стене скобами', 'за 1 м', 4.98),
-                    ('4. Кабель «витая пара» КВП (п. 6, 7, 12)', 'п.7.2 Прокладка КВП кат. 5е по деревянному плинтусу скобами', 'за 1 м', 3.72),
-                    ('4. Кабель «витая пара» КВП (п. 6, 7, 12)', 'п.7.3 Прокладка КВП кат. 5е без закладных устройств', 'за 1 м', 2.58),
-                    ('4. Кабель «витая пара» КВП (п. 6, 7, 12)', 'п.7.4.1 Прокладка КВП в пластиковые (электротехн.) короба', 'за 1 м', 4.20),
-                    ('4. Кабель «витая пара» КВП (п. 6, 7, 12)', 'п.7.4.2 Прокладка КВП в специальные отделения', 'за 1 м', 3.24),
-                    ('4. Кабель «витая пара» КВП (п. 6, 7, 12)', 'п.7.4.3 Прокладка КВП в металлорукава', 'за 1 м', 9.84),
-                    ('4. Кабель «витая пара» КВП (п. 6, 7, 12)', 'п.7.4.4 Прокладка КВП в пластиковые плинтуса', 'за 1 м', 3.78),
-                    ('4. Кабель «витая пара» КВП (п. 6, 7, 12)', 'п.7.4.5 Прокладка КВП в поливинилхлоридные (ПВХ) трубы', 'за 1 м', 4.38),
-                    ('4. Кабель «витая пара» КВП (п. 6, 7, 12)', 'п.7.4.6 Прокладка КВП в лотки неперфорированные с крышкой', 'за 1 м', 5.10),
-                    ('4. Кабель «витая пара» КВП (п. 6, 7, 12)', 'п.12 Оконечивание кабеля «витая пара» (КВП) с одной стороны', 'за услугу', 4.32),
-
-                    ('5. Оптика: ВОК-1, ОКШ, пигтейлы (п. 9, 10, 11)', 'п.9 Восстановление (замена) абон. проводки с исп. ВОК-1 или ОКШ', 'за услугу', 23.94),
-                    ('5. Оптика: ВОК-1, ОКШ, пигтейлы (п. 9, 10, 11)', 'п.10.1 Прокладка ВОК-1/ОКШ/ОП в пластиковые короба', 'за 1 м', 4.74),
-                    ('5. Оптика: ВОК-1, ОКШ, пигтейлы (п. 9, 10, 11)', 'п.10.2 Прокладка ВОК-1/ОКШ/ОП в специальные отделения', 'за 1 м', 3.48),
-                    ('5. Оптика: ВОК-1, ОКШ, пигтейлы (п. 9, 10, 11)', 'п.10.3 Прокладка ВОК-1/ОКШ/ОП в металлорукава', 'за 1 м', 10.44),
-                    ('5. Оптика: ВОК-1, ОКШ, пигтейлы (п. 9, 10, 11)', 'п.10.4 Прокладка ВОК-1/ОКШ/ОП в поливинилхлоридные (ПВХ) трубы', 'за 1 м', 5.22),
-                    ('5. Оптика: ВОК-1, ОКШ, пигтейлы (п. 9, 10, 11)', 'п.10.5 Прокладка ВОК-1/ОКШ/ОП в пластиковые плинтуса', 'за 1 м', 4.32),
-                    ('5. Оптика: ВОК-1, ОКШ, пигтейлы (п. 9, 10, 11)', 'п.10.6 Прокладка ВОК-1/ОКШ/ОП в лотки неперф. с крышкой', 'за 1 м', 5.70),
-                    ('5. Оптика: ВОК-1, ОКШ, пигтейлы (п. 9, 10, 11)', 'п.10.7 Прокладка ВОК-1/ОКШ/ОП без закладных устройств', 'за 1 м', 4.20),
-                    ('5. Оптика: ВОК-1, ОКШ, пигтейлы (п. 9, 10, 11)', 'п.11.1 Оконечивание ВОК-1 с одной стороны неполируемым коннектором', 'за услугу', 10.20),
-                    ('5. Оптика: ВОК-1, ОКШ, пигтейлы (п. 9, 10, 11)', 'п.11.2 Оконечивание ВОК-1 с одной стороны пигтейлом (сварка)', 'за услугу', 15.72),
-                    ('5. Оптика: ВОК-1, ОКШ, пигтейлы (п. 9, 10, 11)', 'п.11.3 Оконечивание ВОК-1 с одной стороны пигтейлом (мех. соед.)', 'за услугу', 11.64);
-                """);
-            }
-
             System.out.println("✅ База данных warehouse.db и все таблицы успешно готовы к работе!");
 
         } catch (SQLException e) {
@@ -205,154 +209,59 @@ public class DatabaseManager {
         }
     }
 
-    // Автоматическое обновление структуры таблицы materials под реальную оборотную ведомость
-    private static void migrateMaterialsTableIfNeeded(Connection conn) {
-        try (Statement stmt = conn.createStatement()) {
-            ResultSet rs = stmt.executeQuery("SELECT sql FROM sqlite_master WHERE type='table' AND name='materials'");
-            if (rs.next()) {
-                String sql = rs.getString(1);
-                if (sql != null && (sql.contains("code TEXT UNIQUE") || !sql.contains("start_qty"))) {
-                    stmt.execute("DROP TABLE IF EXISTS materials;");
-                    stmt.execute("""
-                        CREATE TABLE materials (
-                            id INTEGER PRIMARY KEY AUTOINCREMENT,
-                            account TEXT DEFAULT '10.01',
-                            code TEXT NOT NULL,
-                            name TEXT NOT NULL,
-                            short_name TEXT NOT NULL,
-                            acc_unit TEXT NOT NULL,
-                            work_unit TEXT NOT NULL,
-                            batch_date TEXT DEFAULT '',
-                            conversion_factor REAL DEFAULT 1.0,
-                            price_no_vat REAL NOT NULL,
-                            price_with_vat REAL NOT NULL,
-                            start_qty REAL DEFAULT 0.0,
-                            start_sum REAL DEFAULT 0.0,
-                            in_qty REAL DEFAULT 0.0,
-                            out_qty REAL DEFAULT 0.0,
-                            warehouse_qty REAL DEFAULT 0.0,
-                            end_sum REAL DEFAULT 0.0
-                        );
-                    """);
-                }
-            }
-        } catch (SQLException e) {
-            e.printStackTrace();
-        }
-    }
-
-    // Сохранение позиций из загруженной Excel-ведомости (счета 10.01 и 10.05)
     public static String saveImportedMaterials(List<ExcelImporter.MaterialRow> rows) {
-        int totalLoaded = 0;
-        int activeCount = 0;
-
         try (Connection conn = getConnection()) {
             conn.setAutoCommit(false);
-            try (Statement stmt = conn.createStatement()) {
-                // Удаляем старые тестовые позиции
-                stmt.execute("DELETE FROM materials WHERE code IN ('10001', '10002', '10003');");
 
-                // ВАЖНО: Обнуляем витрину склада и показатели за прошлый месяц перед загрузкой свежей ведомости!
-                // (Это гарантирует, что исчезнувшие из Excel материалы пропадут и с витрины бота)
+            try (Statement stmt = conn.createStatement()) {
+                // Обнуляем витрину склада и старые данные отчетов перед загрузкой свежей ведомости
                 stmt.execute("UPDATE materials SET warehouse_qty = 0, start_qty = 0, in_qty = 0, out_qty = 0, start_sum = 0, end_sum = 0;");
             }
 
-            for (ExcelImporter.MaterialRow r : rows) {
-                double priceVat = Math.round(r.price * 1.20 * 10000.0) / 10000.0;
+            // Большой запрос, который записывает ВСЕ новые поля
+            String sql = """
+                INSERT INTO materials (
+                    account_number, code, name, original_unit, work_unit, 
+                    conv_factor, price_with_vat, warehouse_qty, batch_info,
+                    start_qty, start_sum, in_qty, out_qty, end_sum
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(code) DO UPDATE SET 
+                    account_number = excluded.account_number,
+                    name = excluded.name,
+                    original_unit = excluded.original_unit,
+                    work_unit = excluded.work_unit,
+                    conv_factor = excluded.conv_factor,
+                    price_with_vat = excluded.price_with_vat,
+                    warehouse_qty = excluded.warehouse_qty,
+                    batch_info = excluded.batch_info,
+                    start_qty = excluded.start_qty,
+                    start_sum = excluded.start_sum,
+                    in_qty = excluded.in_qty,
+                    out_qty = excluded.out_qty,
+                    end_sum = excluded.end_sum
+            """;
 
-                // Проверяем, есть ли уже этот материал (по инвентарному номеру, дате партии и цене)
-                int existingId = -1;
-                try (PreparedStatement psFind = conn.prepareStatement(
-                        "SELECT id FROM materials WHERE code = ? AND batch_date = ? AND ABS(price_no_vat - ?) < 0.0001")) {
-                    psFind.setString(1, r.code);
-                    psFind.setString(2, r.batchDate);
-                    psFind.setDouble(3, r.price);
-                    ResultSet rs = psFind.executeQuery();
-                    if (rs.next()) {
-                        existingId = rs.getInt("id");
-                    }
+            try (PreparedStatement ps = conn.prepareStatement(sql)) {
+                for (ExcelImporter.MaterialRow r : rows) {
+                    ps.setString(1, r.account);
+                    ps.setString(2, r.code);
+                    ps.setString(3, r.name);
+                    ps.setString(4, r.originalUnit);
+                    ps.setString(5, r.workUnit);
+                    ps.setDouble(6, r.convFactor);
+                    ps.setDouble(7, r.priceWithVat);
+                    ps.setDouble(8, r.qty); // Тут уже пересчитанное количество (метры, штуки)
+                    ps.setString(9, r.batchInfo != null ? r.batchInfo : "");
+                    ps.setDouble(10, r.startQty);
+                    ps.setDouble(11, r.startSum);
+                    ps.setDouble(12, r.inQty);
+                    ps.setDouble(13, r.outQty);
+                    ps.setDouble(14, r.endSum);
+                    ps.executeUpdate();
                 }
-
-                // Считаем, сколько этого материала сейчас уже находится на руках у сотрудников
-                double onHands = 0.0;
-                if (existingId != -1) {
-                    try (PreparedStatement psHands = conn.prepareStatement(
-                            "SELECT COALESCE(SUM(quantity), 0) FROM employee_balances WHERE material_id = ?")) {
-                        psHands.setInt(1, existingId);
-                        ResultSet rsH = psHands.executeQuery();
-                        if (rsH.next()) onHands = rsH.getDouble(1);
-                    }
-                }
-
-                // Доступный остаток на складе = Остаток на конец по ведомости (Колонка M) минус то, что уже на руках
-                double warehouseAvailable = Math.max(0.0, r.endQty - onHands);
-
-                if (existingId != -1) {
-                    try (PreparedStatement psUpd = conn.prepareStatement("""
-                        UPDATE materials SET
-                            account = ?, name = ?, short_name = ?, acc_unit = ?, work_unit = ?,
-                            price_no_vat = ?, price_with_vat = ?, start_qty = ?, start_sum = ?,
-                            in_qty = ?, out_qty = ?, warehouse_qty = ?, end_sum = ?
-                        WHERE id = ?
-                    """)) {
-                        psUpd.setString(1, r.account);
-                        psUpd.setString(2, r.name);
-                        psUpd.setString(3, r.name);
-                        psUpd.setString(4, r.unit);
-                        psUpd.setString(5, r.unit);
-                        psUpd.setDouble(6, r.price);
-                        psUpd.setDouble(7, priceVat);
-                        psUpd.setDouble(8, r.startQty);
-                        psUpd.setDouble(9, r.startSum);
-                        psUpd.setDouble(10, r.inQty);
-                        psUpd.setDouble(11, r.outQty);
-                        psUpd.setDouble(12, warehouseAvailable);
-                        psUpd.setDouble(13, r.endSum);
-                        psUpd.setInt(14, existingId);
-                        psUpd.executeUpdate();
-                    }
-                } else {
-                    try (PreparedStatement psIns = conn.prepareStatement("""
-                        INSERT INTO materials (
-                            account, code, name, short_name, acc_unit, work_unit, batch_date,
-                            conversion_factor, price_no_vat, price_with_vat,
-                            start_qty, start_sum, in_qty, out_qty, warehouse_qty, end_sum
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, 1.0, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """)) {
-                        psIns.setString(1, r.account);
-                        psIns.setString(2, r.code);
-                        psIns.setString(3, r.name);
-                        psIns.setString(4, r.name);
-                        psIns.setString(5, r.unit);
-                        psIns.setString(6, r.unit);
-                        psIns.setString(7, r.batchDate);
-                        psIns.setDouble(8, r.price);
-                        psIns.setDouble(9, priceVat);
-                        psIns.setDouble(10, r.startQty);
-                        psIns.setDouble(11, r.startSum);
-                        psIns.setDouble(12, r.inQty);
-                        psIns.setDouble(13, r.outQty);
-                        psIns.setDouble(14, warehouseAvailable);
-                        psIns.setDouble(15, r.endSum);
-                        psIns.executeUpdate();
-                    }
-                }
-
-                totalLoaded++;
-                if (r.endQty > 0) activeCount++;
             }
-
             conn.commit();
-            return String.format("""
-                    ✅ <b>Оборотная ведомость успешно загружена!</b>
-                    
-                    📂 Обработаны счета: <b>10.01</b> и <b>10.05</b>
-                    📋 Всего позиций в ведомости: <b>%d</b>
-                    📦 Позиций с остатком на конец месяца (> 0): <b>%d</b>
-                    
-                    Нажмите «📦 Склад (Наличие и цены)», чтобы посмотреть обновленные остатки.""",
-                    totalLoaded, activeCount);
-
+            return "✅ <b>Оборотная ведомость успешно загружена!</b>\nУмный конвертер единиц (км ➔ м, тыс.шт ➔ шт, гильзы уп ➔ шт) сработал корректно.";
         } catch (SQLException e) {
             e.printStackTrace();
             return "❌ Ошибка базы данных при сохранении ведомости: " + e.getMessage();
@@ -383,22 +292,32 @@ public class DatabaseManager {
     }
 
     public static String getServiceTariffsText() {
-        StringBuilder sb = new StringBuilder("📋 <b>Тарифы на доп. работы по абонентским пунктам (физ. лица, с НДС):</b>\n");
+        StringBuilder sb = new StringBuilder("📋 <b>Утвержденные тарифы (с НДС):</b>\n");
         try (Connection conn = getConnection();
              Statement stmt = conn.createStatement();
-             ResultSet rs = stmt.executeQuery("SELECT category, service_name, unit, price_with_vat FROM service_tariffs ORDER BY id")) {
+             // Нам больше не нужен ID из базы для сортировки категорий
+             ResultSet rs = stmt.executeQuery("SELECT service_name, unit, price_with_vat FROM service_tariffs ORDER BY id")) {
 
-            String currentCategory = "";
+            int currentCategory = -1;
+            int rowNum = 1; // Заводим собственный независимый счетчик строк
+
             while (rs.next()) {
-                String cat = rs.getString("category");
-                if (!cat.equals(currentCategory)) {
-                    sb.append("\n🔹 <b>").append(cat).append(":</b>\n");
-                    currentCategory = cat;
+                int categoryGroup = getCategoryGroup(rowNum); // Группируем по счетчику
+
+                if (categoryGroup != currentCategory) {
+                    sb.append("\n").append(getCategoryHeader(categoryGroup)).append("\n");
+                    currentCategory = categoryGroup;
                 }
-                sb.append(String.format("  • %s (<i>%s</i>) — <b>%.2f руб.</b>\n",
+
+                double price = rs.getDouble("price_with_vat");
+                String priceStr = (price == 0) ? "<i>(не задана)</i>" : String.format(Locale.US, "<b>%.2f руб.</b>", price);
+
+                sb.append(String.format(" ▪️ %s (<i>%s</i>) — %s\n",
                         rs.getString("service_name"),
                         rs.getString("unit"),
-                        rs.getDouble("price_with_vat")));
+                        priceStr));
+
+                rowNum++; // Увеличиваем счетчик для следующей услуги
             }
         } catch (SQLException e) {
             e.printStackTrace();
@@ -406,16 +325,40 @@ public class DatabaseManager {
         return sb.toString();
     }
 
-    public static boolean addServiceTariff(String category, String name, String unit, double price) {
+    // Помощник 1: Определяет номер группы по ID услуги (т.к. мы загружали их по порядку)
+    private static int getCategoryGroup(int id) {
+        if (id <= 2) return 1;
+        if (id <= 6) return 2;
+        if (id <= 9) return 3;
+        if (id <= 13) return 4;
+        if (id <= 15) return 5;
+        if (id <= 17) return 6;
+        return 7;
+    }
+
+    // Помощник 2: Возвращает красивый заголовок для группы
+    private static String getCategoryHeader(int group) {
+        return switch (group) {
+            case 1 -> "🛠 <b>ОБЩИЕ УСЛУГИ</b>";
+            case 2 -> "🔌 <b>РОЗЕТКИ И ШНУРЫ</b>";
+            case 3 -> "🔄 <b>ЗАМЕНА ПРОВОДКИ (ЦЕЛИКОМ)</b>";
+            case 4 -> "✂️ <b>ОКОНЕЧИВАНИЕ И СВАРКА</b>";
+            case 5 -> "🕳 <b>ОТВЕРСТИЯ И КРЕПЛЕНИЕ</b>";
+            case 6 -> "🗑 <b>ДЕМОНТАЖ</b>";
+            case 7 -> "📏 <b>ПРОКЛАДКА КАБЕЛЯ И КОРОБОВ</b>";
+            default -> "🔹 <b>ПРОЧИЕ УСЛУГИ</b>";
+        };
+    }
+
+    // Теперь эта команда будет обновлять цену для уже существующих коротких названий
+    public static boolean updateServicePrice(String name, double price) {
         try (Connection conn = getConnection();
              PreparedStatement ps = conn.prepareStatement(
-                     "INSERT INTO service_tariffs (category, service_name, unit, price_with_vat) VALUES (?, ?, ?, ?)")) {
-            ps.setString(1, category.trim());
+                     "UPDATE service_tariffs SET price_with_vat = ? WHERE service_name = ?")) {
+            ps.setDouble(1, price);
             ps.setString(2, name.trim());
-            ps.setString(3, unit.trim());
-            ps.setDouble(4, price);
-            ps.executeUpdate();
-            return true;
+            int updated = ps.executeUpdate();
+            return updated > 0; // Вернет true, если услуга найдена и обновлена
         } catch (SQLException e) {
             e.printStackTrace();
             return false;
@@ -428,22 +371,25 @@ public class DatabaseManager {
         try (Connection conn = getConnection();
              Statement stmt = conn.createStatement();
              ResultSet rs = stmt.executeQuery("""
-                 SELECT id, account, code, name, work_unit, price_no_vat, price_with_vat, warehouse_qty, batch_date
+                 SELECT id, account_number, code, name, work_unit, price_with_vat, warehouse_qty, batch_info
                  FROM materials
                  WHERE warehouse_qty > 0
-                 ORDER BY account, name, batch_date
+                 ORDER BY account_number, name
              """)) {
             while (rs.next()) {
+                double priceWithVat = rs.getDouble("price_with_vat");
+                double priceNoVat = priceWithVat / 1.20; // Вычисляем цену без НДС на лету
+
                 list.add(new String[]{
                         String.valueOf(rs.getInt("id")),
-                        rs.getString("account"),
+                        rs.getString("account_number"),
                         rs.getString("code"),
                         rs.getString("name"),
                         rs.getString("work_unit"),
-                        fmtPrice(rs.getDouble("price_no_vat")),
-                        fmtPrice(rs.getDouble("price_with_vat")),
+                        fmtPrice(priceNoVat),
+                        fmtPrice(priceWithVat),
                         fmtQty(rs.getDouble("warehouse_qty")),
-                        rs.getString("batch_date")
+                        rs.getString("batch_info") != null ? rs.getString("batch_info") : ""
                 });
             }
         } catch (SQLException e) {
@@ -721,26 +667,26 @@ public class DatabaseManager {
     }
 
     public static String checkCode212History(String phone, String contract) {
+        if ((phone == null || phone.isEmpty() || phone.equals("-")) &&
+                (contract == null || contract.isEmpty() || contract.equals("-"))) return "";
+
         try (Connection conn = getConnection();
              PreparedStatement ps = conn.prepareStatement("""
-                 SELECT date(created_at, 'localtime') as dt, subscriber_address
-                 FROM transactions
-                 WHERE type = 'WRITE_OFF'
-                   AND closing_code = '212'
-                   AND created_at >= datetime('now', '-6 months')
-                   AND (phone_number = ? OR (contract_number = ? AND contract_number != '-'))
-                 ORDER BY created_at DESC LIMIT 1
+                 SELECT closing_code, write_off_date FROM write_offs 
+                 WHERE (phone_number = ? OR contract_number = ?) 
+                 AND closing_code != '227' 
+                 AND write_off_date >= date('now', '-6 month') 
+                 ORDER BY write_off_date DESC LIMIT 1
              """)) {
-            ps.setString(1, phone.trim());
-            ps.setString(2, contract.trim());
+            ps.setString(1, phone);
+            ps.setString(2, contract);
             ResultSet rs = ps.executeQuery();
             if (rs.next()) {
-                return String.format("\n\n⚠️ <b>ВНИМАНИЕ! По этому абоненту уже был использован код 212 (%s, адрес: %s)!</b>\nНе прошло 6 месяцев — <b>код 212 использовать НЕЛЬЗЯ</b>, выбирайте код <b>227</b>!",
-                        rs.getString("dt"), rs.getString("subscriber_address"));
+                String code = rs.getString("closing_code");
+                String date = rs.getString("write_off_date");
+                return "\n\n⚠️ <b>ОСТОРОЖНО:</b> По этому абоненту менее 6 мес. назад уже закрывалась заявка (код " + code + " от " + date + "). <b>Вы обязаны использовать код 227 (любой другой запрещен)!</b>";
             }
-        } catch (SQLException e) {
-            e.printStackTrace();
-        }
+        } catch (SQLException e) { e.printStackTrace(); }
         return "";
     }
 
@@ -1220,8 +1166,9 @@ public class DatabaseManager {
         public String name;
         public String unit;
         public double quantity;
-        public double priceWithVatPerUnit; // Цена за 1 ед. с НДС
+        public double priceWithVatPerUnit;
         public boolean isMaterial;
+        public boolean isSingle; // <-- Добавили признак разовой услуги
     }
 
     public static class ReceiptSession {
@@ -1251,7 +1198,7 @@ public class DatabaseManager {
     // Получить конкретную услугу по ID
     public static ReceiptItem getServiceById(int id) {
         try (Connection conn = getConnection();
-             PreparedStatement ps = conn.prepareStatement("SELECT service_name, unit, price_with_vat FROM service_tariffs WHERE id = ?")) {
+             PreparedStatement ps = conn.prepareStatement("SELECT service_name, unit, price_with_vat, is_single FROM service_tariffs WHERE id = ?")) {
             ps.setInt(1, id);
             ResultSet rs = ps.executeQuery();
             if (rs.next()) {
@@ -1261,6 +1208,7 @@ public class DatabaseManager {
                 item.unit = rs.getString("unit");
                 item.priceWithVatPerUnit = rs.getDouble("price_with_vat");
                 item.isMaterial = false;
+                item.isSingle = rs.getInt("is_single") == 1; // <-- Считываем из БД
                 return item;
             }
         } catch (SQLException e) { e.printStackTrace(); }
@@ -1292,74 +1240,76 @@ public class DatabaseManager {
         return null;
     }
 
-    // Генерация красивого текста квитанции со всей математикой (НДС)
+    // Метод-помощник для превращения бюрократических единиц в нормальные (шт, м)
+    private static String getShortUnit(String fullUnit) {
+        String u = fullUnit.toLowerCase();
+        if (u.contains("услуг") || u.contains("отверст") || u.contains("устройств")) return "шт";
+        if (u.contains("метр")) return "м";
+        return fullUnit;
+    }
+
+    // Генерация красивого текста квитанции в виде таблицы
     public static String generateReceiptText(ReceiptSession session) {
         if (session.items.isEmpty()) return "🛒 Корзина квитанции пуста.";
 
-        StringBuilder sb = new StringBuilder("🧾 <b>АКТ-КВИТАНЦИЯ (Расчет для заполнения)</b>\n");
-        sb.append("==================================\n\n");
+        StringBuilder sb = new StringBuilder("🧾 <b>АКТ-КВИТАНЦИЯ (Расчет для заполнения)</b>\n\n");
 
         double totalServicesVat = 0;
         double totalServicesSum = 0;
         double totalMaterialsVat = 0;
         double totalMaterialsSum = 0;
 
-        // БЛОК 1: УСЛУГИ
-        sb.append("🛠 <b>НАИМЕНОВАНИЕ РАБОТ:</b>\n");
+        // ================= БЛОК 1: УСЛУГИ =================
+        sb.append("╔════ 🛠 <b>ВЫПОЛНЕННЫЕ РАБОТЫ</b> ════╗\n");
         boolean hasServices = false;
         for (ReceiptItem item : session.items) {
             if (!item.isMaterial) {
                 hasServices = true;
                 double sumWithVat = item.quantity * item.priceWithVatPerUnit;
-                double sumWithoutVat = sumWithVat / 1.20;
-                double vatSum = sumWithVat - sumWithoutVat;
+                double vatSum = sumWithVat - (sumWithVat / 1.20);
 
                 totalServicesSum += sumWithVat;
                 totalServicesVat += vatSum;
 
-                sb.append(String.format("🔹 <b>%s</b>\n", item.name));
-                sb.append(String.format("   Кол-во: %s %s\n", fmtQty(item.quantity), item.unit));
-                sb.append(String.format("   Стоимость (без НДС): %.2f руб.\n", sumWithoutVat));
-                sb.append(String.format("   Сумма НДС (20%%): %.2f руб.\n", vatSum));
-                sb.append(String.format("   <b>Сумма с НДС: %.2f руб.</b>\n\n", sumWithVat));
+                String displayUnit = getShortUnit(item.unit);
+
+                sb.append(String.format("🔹 %s\n", item.name));
+                sb.append(String.format(" ┝ %s %s  х  %.2f  =  <b>%.2f руб.</b>\n",
+                        fmtQty(item.quantity), displayUnit, item.priceWithVatPerUnit, sumWithVat));
             }
         }
-        if (!hasServices) sb.append("<i>Услуги не добавлялись.</i>\n\n");
-        else {
-            sb.append(String.format("<b>ИТОГО ПО РАБОТАМ с НДС: %.2f руб.</b>\n", totalServicesSum));
-            sb.append(String.format("В том числе НДС: %.2f руб.\n", totalServicesVat));
-            sb.append("----------------------------------\n\n");
-        }
+        if (!hasServices) sb.append("<i>Услуги не добавлялись</i>\n");
 
-        // БЛОК 2: МАТЕРИАЛЫ
-        sb.append("📦 <b>НАИМЕНОВАНИЕ МАТЕРИАЛОВ:</b>\n");
+        sb.append("╠═══════════════════════════════╣\n");
+        sb.append(String.format("Итого по работам: <b>%.2f руб.</b>\n", totalServicesSum));
+        sb.append(String.format("(В том числе НДС 20%%: %.2f руб.)\n\n", totalServicesVat));
+
+        // ================= БЛОК 2: МАТЕРИАЛЫ =================
+        sb.append("╔══ 📦 <b>ИЗРАСХОДОВАННЫЕ МАТЕРИАЛЫ</b> ══╗\n");
         boolean hasMaterials = false;
         for (ReceiptItem item : session.items) {
             if (item.isMaterial) {
                 hasMaterials = true;
                 double sumWithVat = item.quantity * item.priceWithVatPerUnit;
-                double sumWithoutVat = sumWithVat / 1.20;
-                double vatSum = sumWithVat - sumWithoutVat;
+                double vatSum = sumWithVat - (sumWithVat / 1.20);
 
                 totalMaterialsSum += sumWithVat;
                 totalMaterialsVat += vatSum;
 
-                sb.append(String.format("🔹 <b>%s</b>\n", item.name));
-                sb.append(String.format("   Кол-во: %s %s\n", fmtQty(item.quantity), item.unit));
-                sb.append(String.format("   Стоимость (без НДС): %.2f руб.\n", sumWithoutVat));
-                sb.append(String.format("   Сумма НДС (20%%): %.2f руб.\n", vatSum));
-                sb.append(String.format("   <b>Сумма с НДС: %.2f руб.</b>\n\n", sumWithVat));
+                sb.append(String.format("🔹 %s\n", item.name));
+                sb.append(String.format(" ┝ %s %s  х  %.2f  =  <b>%.2f руб.</b>\n",
+                        fmtQty(item.quantity), item.unit, item.priceWithVatPerUnit, sumWithVat));
             }
         }
-        if (!hasMaterials) sb.append("<i>Материалы не добавлялись.</i>\n\n");
-        else {
-            sb.append(String.format("<b>ИТОГО ПО МАТЕРИАЛАМ с НДС: %.2f руб.</b>\n", totalMaterialsSum));
-            sb.append(String.format("В том числе НДС: %.2f руб.\n", totalMaterialsVat));
-            sb.append("----------------------------------\n\n");
-        }
+        if (!hasMaterials) sb.append("<i>Материалы не добавлялись</i>\n");
 
-        // ИТОГО
+        sb.append("╠═══════════════════════════════╣\n");
+        sb.append(String.format("Итого по материалам: <b>%.2f руб.</b>\n", totalMaterialsSum));
+        sb.append(String.format("(В том числе НДС 20%%: %.2f руб.)\n\n", totalMaterialsVat));
+
+        // ================= ИТОГО =================
         double finalSum = totalServicesSum + totalMaterialsSum;
+        sb.append("═══════════════════════════════════\n");
         sb.append(String.format("💰 <b>ВСЕГО К ОПЛАТЕ: %.2f руб.</b>", finalSum));
 
         return sb.toString();

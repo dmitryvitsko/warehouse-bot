@@ -9,7 +9,7 @@ public class DatabaseManager {
     private static final String DB_URL = "jdbc:sqlite:warehouse.db";
 
     // ВАШ TELEGRAM ID АДМИНИСТРАТОРА (МОЛ)
-    public static final long ADMIN_ID = 576227060L;
+    public static final long ADMIN_ID = 129265455L;
 
     private static final DecimalFormat QTY_FMT;
     private static final DecimalFormat PRICE_FMT;
@@ -207,6 +207,25 @@ public class DatabaseManager {
                             status_code TEXT
                         );
                     """);
+            // 7. Таблица инструмента
+            stmt.execute("""
+                CREATE TABLE IF NOT EXISTS tools (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    inv_number TEXT,
+                    status TEXT DEFAULT 'IN_STOCK',
+                    assigned_to INTEGER,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                );
+            """);
+
+            // Добавляем колонки для причины и даты списания (если их еще нет)
+            try {
+                stmt.execute("ALTER TABLE tools ADD COLUMN write_off_reason TEXT;");
+            } catch (SQLException ignored) {}
+            try {
+                stmt.execute("ALTER TABLE tools ADD COLUMN written_off_at DATETIME;");
+            } catch (SQLException ignored) {}
 
             System.out.println("✅ База данных warehouse.db и все таблицы успешно готовы к работе!");
 
@@ -1438,5 +1457,355 @@ public class DatabaseManager {
             if (updated > 0) return ban ? "✅ Пользователь " + targetUserId + " заблокирован. Бот больше не будет ему отвечать." : "✅ Пользователь разблокирован.";
             return "❌ Пользователь не найден или это администратор (которого нельзя заблокировать).";
         } catch (SQLException e) { return "❌ Ошибка базы данных."; }
+    }
+    // Класс для временного хранения данных из Excel
+    public static class ParsedTool {
+        public String invNumber;
+        public String name;
+        public int quantity;
+    }
+
+    // Сохранение инструмента из Excel
+    public static String saveImportedTools(List<ParsedTool> tools) {
+        try (Connection conn = getConnection()) {
+            conn.setAutoCommit(false);
+
+            // Если вы загружаете базу первый раз, можем просто добавлять.
+            String sql = "INSERT INTO tools (name, inv_number, status) VALUES (?, ?, 'IN_STOCK')";
+
+            int addedCount = 0;
+
+            try (PreparedStatement ps = conn.prepareStatement(sql)) {
+
+                for (ParsedTool t : tools) {
+                    int qty = t.quantity > 0 ? t.quantity : 1; // Защита от нулевого количества
+                    for (int i = 1; i <= qty; i++) {
+                        ps.setString(1, t.name);
+
+                        // Логика номеров: если нет номера, пишем "Б/Н - 1", "Б/Н - 2"
+                        // Если номер есть, но количество > 1, пишем "112233 (1)", "112233 (2)"
+                        String inv = (t.invNumber == null || t.invNumber.trim().isEmpty())
+                                ? "Б/Н - " + i
+                                : (qty > 1 ? t.invNumber + " (" + i + ")" : t.invNumber);
+
+                        ps.setString(2, inv);
+                        ps.executeUpdate();
+                        addedCount++;
+                    }
+                }
+            }
+            conn.commit();
+            return "✅ <b>База инструмента успешно загружена!</b>\nДобавлено единиц на склад: <b>" + addedCount + "</b> шт.";
+        } catch (SQLException e) {
+            e.printStackTrace();
+            return "❌ Ошибка базы данных при сохранении инструмента: " + e.getMessage();
+        }
+    }
+    // ==========================================
+    // ЛОГИКА УЧЕТА ИНСТРУМЕНТА
+    // ==========================================
+
+    // 1. Посмотреть свой инструмент (для мастера)
+    public static String getUserToolsText(long userId) {
+        StringBuilder sb = new StringBuilder("🪛 <b>Ваш закрепленный инструмент:</b>\n\n");
+        boolean hasTools = false;
+        try (Connection conn = getConnection();
+             PreparedStatement ps = conn.prepareStatement(
+                     "SELECT name, inv_number FROM tools WHERE status = 'ASSIGNED' AND assigned_to = ? ORDER BY name")) {
+            ps.setLong(1, userId);
+            ResultSet rs = ps.executeQuery();
+            int counter = 1;
+            while (rs.next()) {
+                hasTools = true;
+                sb.append(String.format("%d. <b>%s</b> (Инв. №: <code>%s</code>)\n",
+                        counter++, rs.getString("name"), rs.getString("inv_number")));
+            }
+        } catch (SQLException e) { e.printStackTrace(); }
+        return hasTools ? sb.toString() : "🪛 За вами пока не закреплен инструмент.";
+    }
+
+    // 2. Аудит инструмента (для админа)
+    public static String getToolsAuditText() {
+        StringBuilder sb = new StringBuilder("📊 <b>Аудит инструмента:</b>\n\n");
+        try (Connection conn = getConnection();
+             Statement stmt = conn.createStatement()) {
+
+            // На складе
+            ResultSet rsStock = stmt.executeQuery("SELECT COUNT(*) FROM tools WHERE status = 'IN_STOCK'");
+            int inStock = rsStock.next() ? rsStock.getInt(1) : 0;
+            sb.append("📦 На складе (доступно к выдаче): <b>").append(inStock).append(" шт.</b>\n\n");
+
+            // На руках
+            ResultSet rsAssigned = stmt.executeQuery("""
+                SELECT u.full_name, COUNT(t.id) as cnt 
+                FROM tools t 
+                JOIN users u ON t.assigned_to = u.id 
+                WHERE t.status = 'ASSIGNED' 
+                GROUP BY u.id ORDER BY u.full_name
+            """);
+            boolean hasAssigned = false;
+            sb.append("👥 <b>На руках у сотрудников:</b>\n");
+            while (rsAssigned.next()) {
+                hasAssigned = true;
+                sb.append(String.format(" • %s: <b>%d шт.</b>\n", rsAssigned.getString("full_name"), rsAssigned.getInt("cnt")));
+            }
+            if (!hasAssigned) sb.append(" <i>(Никому ничего не выдано)</i>\n");
+
+        } catch (SQLException e) { e.printStackTrace(); }
+        return sb.toString();
+    }
+    // Получить сгруппированный список свободного инструмента
+    public static List<String[]> getAvailableToolGroups() {
+        List<String[]> list = new ArrayList<>();
+        try (Connection conn = getConnection();
+             Statement stmt = conn.createStatement();
+             ResultSet rs = stmt.executeQuery(
+                     "SELECT MIN(id) as first_id, name, COUNT(*) as cnt FROM tools WHERE status = 'IN_STOCK' GROUP BY name ORDER BY name"
+             )) {
+            while (rs.next()) {
+                list.add(new String[]{
+                        String.valueOf(rs.getInt("first_id")),
+                        rs.getString("name"),
+                        String.valueOf(rs.getInt("cnt"))
+                });
+            }
+        } catch (SQLException e) { e.printStackTrace(); }
+        return list;
+    }
+
+    // Получить список сотрудников для выдачи
+    public static List<String[]> getUsersForToolAssignment() {
+        List<String[]> list = new ArrayList<>();
+        try (Connection conn = getConnection();
+             Statement stmt = conn.createStatement();
+             ResultSet rs = stmt.executeQuery("SELECT id, full_name, role FROM users WHERE role != 'BANNED' AND role != 'PENDING' ORDER BY full_name")) {
+            while (rs.next()) {
+                list.add(new String[]{
+                        String.valueOf(rs.getLong("id")),
+                        rs.getString("full_name"),
+                        rs.getString("role")
+                });
+            }
+        } catch (SQLException e) { e.printStackTrace(); }
+        return list;
+    }
+
+    // Процесс выдачи (закрепления)
+    public static String assignTool(int toolId, long userId) {
+        try (Connection conn = getConnection()) {
+            // Проверяем статус и берем данные конкретной единицы (по ID первой свободной в группе)
+            PreparedStatement psCheck = conn.prepareStatement("SELECT name, inv_number FROM tools WHERE id = ? AND status = 'IN_STOCK'");
+            psCheck.setInt(1, toolId);
+            ResultSet rs = psCheck.executeQuery();
+            if (!rs.next()) return "❌ Этот инструмент уже выдан или списан. Попробуйте выбрать заново.";
+
+            String name = rs.getString("name");
+            String inv = rs.getString("inv_number");
+
+            // Ищем имя сотрудника
+            PreparedStatement psUser = conn.prepareStatement("SELECT full_name FROM users WHERE id = ?");
+            psUser.setLong(1, userId);
+            ResultSet rsUser = psUser.executeQuery();
+            String userName = rsUser.next() ? rsUser.getString("full_name") : "Неизвестный сотрудник";
+
+            // Выдаем
+            PreparedStatement psUpdate = conn.prepareStatement("UPDATE tools SET status = 'ASSIGNED', assigned_to = ? WHERE id = ?");
+            psUpdate.setLong(1, userId);
+            psUpdate.setInt(2, toolId);
+            psUpdate.executeUpdate();
+
+            return String.format("✅ <b>Успешно выдано!</b>\n\n🪛 Инструмент: <b>%s</b>\n🔢 Инв. №: <code>%s</code>\n👤 Выдано сотруднику: <b>%s</b>", name, inv, userName);
+        } catch (SQLException e) {
+            e.printStackTrace();
+            return "❌ Ошибка при выдаче инструмента.";
+        }
+    }
+    // Получить полное название и инвентарный номер инструмента по его ID
+    public static String getToolNameAndInvById(int toolId) {
+        try (Connection conn = getConnection();
+             PreparedStatement ps = conn.prepareStatement("SELECT name, inv_number FROM tools WHERE id = ?")) {
+            ps.setInt(1, toolId);
+            ResultSet rs = ps.executeQuery();
+            if (rs.next()) {
+                String name = rs.getString("name");
+                String inv = rs.getString("inv_number");
+                return name + " (Инв. №: " + inv + ")";
+            }
+        } catch (SQLException e) { e.printStackTrace(); }
+        return "Неизвестный инструмент";
+    }
+    // Получить список сотрудников, у которых есть инструмент на руках
+    public static List<String[]> getUsersWithAssignedTools() {
+        List<String[]> list = new ArrayList<>();
+        try (Connection conn = getConnection();
+             Statement stmt = conn.createStatement();
+             ResultSet rs = stmt.executeQuery("""
+                     SELECT DISTINCT u.id, u.full_name 
+                     FROM tools t 
+                     JOIN users u ON t.assigned_to = u.id 
+                     WHERE t.status = 'ASSIGNED' 
+                     ORDER BY u.full_name
+                 """)) {
+            while (rs.next()) {
+                list.add(new String[]{
+                        String.valueOf(rs.getLong("id")),
+                        rs.getString("full_name")
+                });
+            }
+        } catch (SQLException e) { e.printStackTrace(); }
+        return list;
+    }
+
+    // Получить список инструмента конкретного сотрудника для возврата
+    public static List<String[]> getUserAssignedToolsForReturn(long userId) {
+        List<String[]> list = new ArrayList<>();
+        try (Connection conn = getConnection();
+             PreparedStatement ps = conn.prepareStatement(
+                     "SELECT id, name, inv_number FROM tools WHERE status = 'ASSIGNED' AND assigned_to = ? ORDER BY name")) {
+            ps.setLong(1, userId);
+            ResultSet rs = ps.executeQuery();
+            while (rs.next()) {
+                list.add(new String[]{
+                        String.valueOf(rs.getInt("id")),
+                        rs.getString("name"),
+                        rs.getString("inv_number")
+                });
+            }
+        } catch (SQLException e) { e.printStackTrace(); }
+        return list;
+    }
+
+    // Оформление возврата инструмента на склад
+    public static String returnToolToWarehouse(int toolId) {
+        try (Connection conn = getConnection()) {
+            // Узнаем, что именно возвращаем, чтобы красиво написать в ответе
+            PreparedStatement psCheck = conn.prepareStatement("SELECT name, inv_number FROM tools WHERE id = ?");
+            psCheck.setInt(1, toolId);
+            ResultSet rs = psCheck.executeQuery();
+            if (!rs.next()) return "❌ Инструмент не найден.";
+
+            String name = rs.getString("name");
+            String inv = rs.getString("inv_number");
+
+            // Переводим статус обратно на склад
+            PreparedStatement psUpdate = conn.prepareStatement("UPDATE tools SET status = 'IN_STOCK', assigned_to = NULL WHERE id = ?");
+            psUpdate.setInt(1, toolId);
+            psUpdate.executeUpdate();
+
+            return String.format("✅ <b>Инструмент успешно возвращен на склад!</b>\n\n🪛 <b>%s</b>\n🔢 Инв. №: <code>%s</code>", name, inv);
+        } catch (SQLException e) {
+            e.printStackTrace();
+            return "❌ Ошибка базы данных при возврате инструмента.";
+        }
+    }
+    // Получить конкретные единицы инструмента со склада для списания
+    public static List<String[]> getToolsInStockByGroup(String firstIdStr) {
+        List<String[]> list = new ArrayList<>();
+        try (Connection conn = getConnection();
+             PreparedStatement psCheck = conn.prepareStatement("SELECT name FROM tools WHERE id = ?");
+             PreparedStatement ps = conn.prepareStatement("SELECT id, name, inv_number FROM tools WHERE status = 'IN_STOCK' AND name = ? ORDER BY inv_number")) {
+            psCheck.setInt(1, Integer.parseInt(firstIdStr));
+            ResultSet rsCheck = psCheck.executeQuery();
+            if (rsCheck.next()) {
+                ps.setString(1, rsCheck.getString("name"));
+                ResultSet rs = ps.executeQuery();
+                while (rs.next()) {
+                    list.add(new String[]{ String.valueOf(rs.getInt("id")), rs.getString("name"), rs.getString("inv_number") });
+                }
+            }
+        } catch (SQLException e) { e.printStackTrace(); }
+        return list;
+    }
+
+    // Окончательное списание инструмента с указанием причины
+    public static String writeOffTool(int toolId, String reason) {
+        try (Connection conn = getConnection()) {
+            PreparedStatement psCheck = conn.prepareStatement("SELECT name, inv_number FROM tools WHERE id = ?");
+            psCheck.setInt(1, toolId);
+            ResultSet rs = psCheck.executeQuery();
+            if (!rs.next()) return "❌ Инструмент не найден.";
+
+            String name = rs.getString("name");
+            String inv = rs.getString("inv_number");
+
+            PreparedStatement ps = conn.prepareStatement(
+                    "UPDATE tools SET status = 'WRITTEN_OFF', assigned_to = NULL, write_off_reason = ?, written_off_at = datetime('now', 'localtime') WHERE id = ?");
+            ps.setString(1, reason);
+            ps.setInt(2, toolId);
+            ps.executeUpdate();
+
+            return String.format("✅ <b>Инструмент успешно СПИСАН!</b>\n\n🪛 <b>%s</b>\n🔢 Инв. №: <code>%s</code>\n📝 Причина: <i>%s</i>", name, inv, reason);
+        } catch (SQLException e) {
+            e.printStackTrace();
+            return "❌ Ошибка БД при списании.";
+        }
+    }
+    // Получить архив списанного инструмента
+    public static String getWrittenOffToolsArchiveText() {
+        StringBuilder sb = new StringBuilder("🗄 <b>Архив списанного инструмента:</b>\n\n");
+        boolean hasItems = false;
+        try (Connection conn = getConnection();
+             Statement stmt = conn.createStatement();
+             // Достаем дату в формате ДД.ММ.ГГГГ с помощью функции strftime
+             ResultSet rs = stmt.executeQuery(
+                     "SELECT name, inv_number, write_off_reason, strftime('%d.%m.%Y', written_off_at) as wo_date " +
+                             "FROM tools WHERE status = 'WRITTEN_OFF' ORDER BY name")) {
+
+            int counter = 1;
+            while (rs.next()) {
+                hasItems = true;
+                String reason = rs.getString("write_off_reason");
+                if (reason == null || reason.isEmpty()) reason = "Не указана";
+
+                String date = rs.getString("wo_date");
+                if (date == null) date = "Дата неизвестна"; // Для того инструмента, что списали до этого обновления
+
+                sb.append(String.format("%d. <b>%s</b>\n   • Инв. №: <code>%s</code>\n   • Дата списания: <b>%s</b>\n   • Причина: <i>%s</i>\n\n",
+                        counter++, rs.getString("name"), rs.getString("inv_number"), date, reason));
+            }
+        } catch (SQLException e) { e.printStackTrace(); }
+
+        return hasItems ? sb.toString() : "🗄 В архиве списанного инструмента пока пусто.";
+    }
+    // Получить список списанного инструмента для восстановления (в виде кнопок)
+    public static List<String[]> getWrittenOffToolsForRestore() {
+        List<String[]> list = new ArrayList<>();
+        try (Connection conn = getConnection();
+             Statement stmt = conn.createStatement();
+             ResultSet rs = stmt.executeQuery(
+                     "SELECT id, name, inv_number FROM tools WHERE status = 'WRITTEN_OFF' ORDER BY name")) {
+            while (rs.next()) {
+                list.add(new String[]{
+                        String.valueOf(rs.getInt("id")),
+                        rs.getString("name"),
+                        rs.getString("inv_number")
+                });
+            }
+        } catch (SQLException e) { e.printStackTrace(); }
+        return list;
+    }
+
+    // Восстановить инструмент на склад
+    public static String restoreToolToStock(int toolId) {
+        try (Connection conn = getConnection()) {
+            PreparedStatement psCheck = conn.prepareStatement("SELECT name, inv_number FROM tools WHERE id = ?");
+            psCheck.setInt(1, toolId);
+            ResultSet rs = psCheck.executeQuery();
+            if (!rs.next()) return "❌ Инструмент не найден.";
+
+            String name = rs.getString("name");
+            String inv = rs.getString("inv_number");
+
+            // Меняем статус на IN_STOCK и затираем причину списания
+            PreparedStatement ps = conn.prepareStatement(
+                    "UPDATE tools SET status = 'IN_STOCK', write_off_reason = NULL, written_off_at = NULL WHERE id = ?");
+            ps.setInt(1, toolId);
+            ps.executeUpdate();
+
+            return String.format("✅ <b>Инструмент успешно восстановлен из архива на склад!</b>\n\n🪛 <b>%s</b>\n🔢 Инв. №: <code>%s</code>\n📦 Теперь он снова доступен для выдачи.", name, inv);
+        } catch (SQLException e) {
+            e.printStackTrace();
+            return "❌ Ошибка базы данных при восстановлении.";
+        }
     }
 }

@@ -263,4 +263,52 @@ public class ExcelImporter {
         }
         return "";
     }
+    public static String importToolsSheet(File file) {
+        List<DatabaseManager.ParsedTool> tools = new ArrayList<>();
+        try (FileInputStream fis = new FileInputStream(file);
+             org.apache.poi.ss.usermodel.Workbook workbook = org.apache.poi.ss.usermodel.WorkbookFactory.create(fis)) {
+
+            // Берем первый лист
+            org.apache.poi.ss.usermodel.Sheet sheet = workbook.getSheetAt(0);
+
+            for (org.apache.poi.ss.usermodel.Row row : sheet) {
+                if (row.getRowNum() == 0) continue; // Пропускаем строку с заголовками
+
+                // Колонка B (индекс 1) - Название инструмента
+                org.apache.poi.ss.usermodel.Cell nameCell = row.getCell(1);
+                if (nameCell == null || nameCell.getCellType() == org.apache.poi.ss.usermodel.CellType.BLANK) continue;
+                String name = nameCell.getStringCellValue().trim();
+
+                // Колонка A (индекс 0) - Инвентарный номер
+                org.apache.poi.ss.usermodel.Cell invCell = row.getCell(0);
+                String invNumber = "";
+                if (invCell != null) {
+                    if (invCell.getCellType() == org.apache.poi.ss.usermodel.CellType.STRING) {
+                        invNumber = invCell.getStringCellValue().trim();
+                    } else if (invCell.getCellType() == org.apache.poi.ss.usermodel.CellType.NUMERIC) {
+                        // Если эксель решил, что номер это число, убираем нули после запятой
+                        invNumber = String.valueOf((long) invCell.getNumericCellValue());
+                    }
+                }
+
+                // Колонка L (индекс 11) - Количество
+                org.apache.poi.ss.usermodel.Cell qtyCell = row.getCell(11);
+                int qty = 1; // По умолчанию 1
+                if (qtyCell != null && qtyCell.getCellType() == org.apache.poi.ss.usermodel.CellType.NUMERIC) {
+                    qty = (int) qtyCell.getNumericCellValue();
+                }
+
+                DatabaseManager.ParsedTool tool = new DatabaseManager.ParsedTool();
+                tool.name = name;
+                tool.invNumber = invNumber;
+                tool.quantity = qty;
+                tools.add(tool);
+            }
+            return DatabaseManager.saveImportedTools(tools);
+        } catch (Exception e) {
+            e.printStackTrace();
+            return "❌ Ошибка при чтении Excel файла с инструментом: " + e.getMessage();
+        }
+    }
+
 }

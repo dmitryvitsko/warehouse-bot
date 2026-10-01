@@ -39,33 +39,33 @@ public class DatabaseManager {
 
             // 1. Таблица сотрудников
             stmt.execute("""
-                CREATE TABLE IF NOT EXISTS users (
-                    id INTEGER PRIMARY KEY,
-                    full_name TEXT NOT NULL,
-                    role TEXT DEFAULT 'WORKER'
-                );
-            """);
+                        CREATE TABLE IF NOT EXISTS users (
+                            id INTEGER PRIMARY KEY,
+                            full_name TEXT NOT NULL,
+                            role TEXT DEFAULT 'WORKER'
+                        );
+                    """);
 
             // 2. Таблица материалов на складе (с поддержкой конвертации единиц)
             stmt.execute("""
-                CREATE TABLE IF NOT EXISTS materials (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    account_number TEXT NOT NULL,
-                    code TEXT UNIQUE NOT NULL,
-                    name TEXT NOT NULL,
-                    original_unit TEXT NOT NULL,
-                    work_unit TEXT NOT NULL,
-                    conv_factor REAL DEFAULT 1.0,
-                    price_with_vat REAL NOT NULL,
-                    warehouse_qty REAL NOT NULL,
-                    batch_info TEXT,
-                    start_qty REAL DEFAULT 0.0,
-                    start_sum REAL DEFAULT 0.0,
-                    in_qty REAL DEFAULT 0.0,
-                    out_qty REAL DEFAULT 0.0,
-                    end_sum REAL DEFAULT 0.0
-                );
-            """);
+                        CREATE TABLE IF NOT EXISTS materials (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            account_number TEXT NOT NULL,
+                            code TEXT UNIQUE NOT NULL,
+                            name TEXT NOT NULL,
+                            original_unit TEXT NOT NULL,
+                            work_unit TEXT NOT NULL,
+                            conv_factor REAL DEFAULT 1.0,
+                            price_with_vat REAL NOT NULL,
+                            warehouse_qty REAL NOT NULL,
+                            batch_info TEXT,
+                            start_qty REAL DEFAULT 0.0,
+                            start_sum REAL DEFAULT 0.0,
+                            in_qty REAL DEFAULT 0.0,
+                            out_qty REAL DEFAULT 0.0,
+                            end_sum REAL DEFAULT 0.0
+                        );
+                    """);
 
             // Безопасное добавление новых колонок для конвертера (если их еще нет)
             try {
@@ -78,59 +78,65 @@ public class DatabaseManager {
 
             // 3. Таблица подотчета мастеров
             stmt.execute("""
-                CREATE TABLE IF NOT EXISTS employee_balances (
-                    user_id INTEGER,
-                    material_id INTEGER,
-                    quantity REAL DEFAULT 0.0,
-                    PRIMARY KEY (user_id, material_id)
-                );
-            """);
+                        CREATE TABLE IF NOT EXISTS employee_balances (
+                            user_id INTEGER,
+                            material_id INTEGER,
+                            quantity REAL DEFAULT 0.0,
+                            PRIMARY KEY (user_id, material_id)
+                        );
+                    """);
 
             // 4. Журнал всех операций
             stmt.execute("""
-                CREATE TABLE IF NOT EXISTS transactions (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    type TEXT NOT NULL,
-                    user_id INTEGER,
-                    material_id INTEGER,
-                    quantity REAL NOT NULL,
-                    is_paid_receipt INTEGER DEFAULT 0,
-                    receipt_number TEXT,
-                    phone_number TEXT,
-                    contract_number TEXT,
-                    subscriber_address TEXT,
-                    closing_code TEXT,
-                    write_off_reason TEXT,
-                    total_sum_with_vat REAL DEFAULT 0.0,
-                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-                );
-            """);
+                        CREATE TABLE IF NOT EXISTS transactions (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            type TEXT NOT NULL,
+                            user_id INTEGER,
+                            material_id INTEGER,
+                            quantity REAL NOT NULL,
+                            is_paid_receipt INTEGER DEFAULT 0,
+                            receipt_number TEXT,
+                            phone_number TEXT,
+                            contract_number TEXT,
+                            subscriber_address TEXT,
+                            closing_code TEXT,
+                            write_off_reason TEXT,
+                            total_sum_with_vat REAL DEFAULT 0.0,
+                            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                        );
+                    """);
 
             // 4.1. Таблица заявок на возврат материала на склад (ожидающих подтверждения МОЛ)
             stmt.execute("""
-                CREATE TABLE IF NOT EXISTS return_requests (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id INTEGER NOT NULL,
-                    material_id INTEGER NOT NULL,
-                    quantity REAL NOT NULL,
-                    status TEXT DEFAULT 'PENDING',
-                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-                );
-            """);
+                        CREATE TABLE IF NOT EXISTS return_requests (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            user_id INTEGER NOT NULL,
+                            material_id INTEGER NOT NULL,
+                            quantity REAL NOT NULL,
+                            status TEXT DEFAULT 'PENDING',
+                            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                        );
+                    """);
 
-            try { stmt.execute("ALTER TABLE transactions ADD COLUMN phone_number TEXT;"); } catch (SQLException ignored) {}
-            try { stmt.execute("ALTER TABLE transactions ADD COLUMN closing_code TEXT;"); } catch (SQLException ignored) {}
+            try {
+                stmt.execute("ALTER TABLE transactions ADD COLUMN phone_number TEXT;");
+            } catch (SQLException ignored) {
+            }
+            try {
+                stmt.execute("ALTER TABLE transactions ADD COLUMN closing_code TEXT;");
+            } catch (SQLException ignored) {
+            }
 
             // 5. Таблица тарифов (Приказ РУП «Белтелеком», вводятся с 10.11.2025 — физ. лица с НДС)
             stmt.execute("""
-                CREATE TABLE IF NOT EXISTS service_tariffs (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    service_name TEXT NOT NULL,
-                    unit TEXT NOT NULL,
-                    price_with_vat REAL NOT NULL,
-                    is_single INTEGER DEFAULT 0
-                );
-            """);
+                        CREATE TABLE IF NOT EXISTS service_tariffs (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            service_name TEXT NOT NULL,
+                            unit TEXT NOT NULL,
+                            price_with_vat REAL NOT NULL,
+                            is_single INTEGER DEFAULT 0
+                        );
+                    """);
 
 
             // Умная проверка: если таблица пустая ИЛИ все цены равны нулю, заполняем правильным прайсом
@@ -182,25 +188,25 @@ public class DatabaseManager {
 
             // 6. Таблицы для графиков работы
             stmt.execute("""
-                CREATE TABLE IF NOT EXISTS user_excel_names (
-                    user_id INTEGER PRIMARY KEY,
-                    excel_name TEXT NOT NULL
-                );
-            """);
+                        CREATE TABLE IF NOT EXISTS user_excel_names (
+                            user_id INTEGER PRIMARY KEY,
+                            excel_name TEXT NOT NULL
+                        );
+                    """);
 
             // Заменили DROP TABLE на безопасное CREATE TABLE IF NOT EXISTS
             stmt.execute("""
-                CREATE TABLE IF NOT EXISTS schedules (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    excel_name TEXT NOT NULL,
-                    month_name TEXT,
-                    year_val INTEGER,
-                    day_num INTEGER NOT NULL,
-                    start_time TEXT,
-                    end_time TEXT,
-                    status_code TEXT
-                );
-            """);
+                        CREATE TABLE IF NOT EXISTS schedules (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            excel_name TEXT NOT NULL,
+                            month_name TEXT,
+                            year_val INTEGER,
+                            day_num INTEGER NOT NULL,
+                            start_time TEXT,
+                            end_time TEXT,
+                            status_code TEXT
+                        );
+                    """);
 
             System.out.println("✅ База данных warehouse.db и все таблицы успешно готовы к работе!");
 
@@ -220,26 +226,26 @@ public class DatabaseManager {
 
             // Большой запрос, который записывает ВСЕ новые поля
             String sql = """
-                INSERT INTO materials (
-                    account_number, code, name, original_unit, work_unit, 
-                    conv_factor, price_with_vat, warehouse_qty, batch_info,
-                    start_qty, start_sum, in_qty, out_qty, end_sum
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(code) DO UPDATE SET 
-                    account_number = excluded.account_number,
-                    name = excluded.name,
-                    original_unit = excluded.original_unit,
-                    work_unit = excluded.work_unit,
-                    conv_factor = excluded.conv_factor,
-                    price_with_vat = excluded.price_with_vat,
-                    warehouse_qty = excluded.warehouse_qty,
-                    batch_info = excluded.batch_info,
-                    start_qty = excluded.start_qty,
-                    start_sum = excluded.start_sum,
-                    in_qty = excluded.in_qty,
-                    out_qty = excluded.out_qty,
-                    end_sum = excluded.end_sum
-            """;
+                        INSERT INTO materials (
+                            account_number, code, name, original_unit, work_unit, 
+                            conv_factor, price_with_vat, warehouse_qty, batch_info,
+                            start_qty, start_sum, in_qty, out_qty, end_sum
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(code) DO UPDATE SET 
+                            account_number = excluded.account_number,
+                            name = excluded.name,
+                            original_unit = excluded.original_unit,
+                            work_unit = excluded.work_unit,
+                            conv_factor = excluded.conv_factor,
+                            price_with_vat = excluded.price_with_vat,
+                            warehouse_qty = excluded.warehouse_qty,
+                            batch_info = excluded.batch_info,
+                            start_qty = excluded.start_qty,
+                            start_sum = excluded.start_sum,
+                            in_qty = excluded.in_qty,
+                            out_qty = excluded.out_qty,
+                            end_sum = excluded.end_sum
+                    """;
 
             try (PreparedStatement ps = conn.prepareStatement(sql)) {
                 for (ExcelImporter.MaterialRow r : rows) {
@@ -269,7 +275,6 @@ public class DatabaseManager {
     }
 
     public static String getUserRole(long userId, String fullName) {
-        String defaultRole = (userId == ADMIN_ID) ? "ADMIN" : "WORKER";
         try (Connection conn = getConnection()) {
             PreparedStatement ps = conn.prepareStatement("SELECT role FROM users WHERE id = ?");
             ps.setLong(1, userId);
@@ -277,17 +282,19 @@ public class DatabaseManager {
             if (rs.next()) {
                 return rs.getString("role");
             } else {
+                // Если это вы (ADMIN_ID), то даем админа, остальным — режим ожидания PENDING
+                String defaultRole = (userId == ADMIN_ID) ? "ADMIN" : "PENDING";
                 PreparedStatement insert = conn.prepareStatement(
                         "INSERT INTO users (id, full_name, role) VALUES (?, ?, ?)");
                 insert.setLong(1, userId);
                 insert.setString(2, fullName);
                 insert.setString(3, defaultRole);
                 insert.executeUpdate();
-                return defaultRole;
+                return (userId == ADMIN_ID) ? "ADMIN" : "NEW_PENDING";
             }
         } catch (SQLException e) {
             e.printStackTrace();
-            return defaultRole;
+            return "PENDING";
         }
     }
 
@@ -371,11 +378,11 @@ public class DatabaseManager {
         try (Connection conn = getConnection();
              Statement stmt = conn.createStatement();
              ResultSet rs = stmt.executeQuery("""
-                 SELECT id, account_number, code, name, work_unit, price_with_vat, warehouse_qty, batch_info
-                 FROM materials
-                 WHERE warehouse_qty > 0
-                 ORDER BY account_number, name
-             """)) {
+                         SELECT id, account_number, code, name, work_unit, price_with_vat, warehouse_qty, batch_info
+                         FROM materials
+                         WHERE warehouse_qty > 0
+                         ORDER BY account_number, name
+                     """)) {
             while (rs.next()) {
                 double priceWithVat = rs.getDouble("price_with_vat");
                 double priceNoVat = priceWithVat / 1.20; // Вычисляем цену без НДС на лету
@@ -402,11 +409,11 @@ public class DatabaseManager {
     public static WriteOffSession createWriteOffSession(long userId, int materialId) {
         try (Connection conn = getConnection();
              PreparedStatement ps = conn.prepareStatement("""
-                 SELECT m.id, m.code, m.name, m.work_unit, m.price_with_vat, b.quantity
-                 FROM employee_balances b
-                 JOIN materials m ON b.material_id = m.id
-                 WHERE b.user_id = ? AND m.id = ? AND b.quantity > 0
-             """)) {
+                         SELECT m.id, m.code, m.name, m.work_unit, m.price_with_vat, b.quantity
+                         FROM employee_balances b
+                         JOIN materials m ON b.material_id = m.id
+                         WHERE b.user_id = ? AND m.id = ? AND b.quantity > 0
+                     """)) {
             ps.setLong(1, userId);
             ps.setInt(2, materialId);
             ResultSet rs = ps.executeQuery();
@@ -454,9 +461,9 @@ public class DatabaseManager {
             psUpdateWarehouse.executeUpdate();
 
             PreparedStatement psUpdateWorker = conn.prepareStatement("""
-                INSERT INTO employee_balances (user_id, material_id, quantity) VALUES (?, ?, ?)
-                ON CONFLICT(user_id, material_id) DO UPDATE SET quantity = ROUND(quantity + excluded.quantity, 6)
-            """);
+                        INSERT INTO employee_balances (user_id, material_id, quantity) VALUES (?, ?, ?)
+                        ON CONFLICT(user_id, material_id) DO UPDATE SET quantity = ROUND(quantity + excluded.quantity, 6)
+                    """);
             psUpdateWorker.setLong(1, userId);
             psUpdateWorker.setInt(2, materialId);
             psUpdateWorker.setDouble(3, qtyToTake);
@@ -465,9 +472,9 @@ public class DatabaseManager {
             double totalSum = qtyToTake * priceVat;
 
             PreparedStatement psLog = conn.prepareStatement("""
-                INSERT INTO transactions (type, user_id, material_id, quantity, total_sum_with_vat)
-                VALUES ('ISSUE', ?, ?, ?, ?)
-            """);
+                        INSERT INTO transactions (type, user_id, material_id, quantity, total_sum_with_vat)
+                        VALUES ('ISSUE', ?, ?, ?, ?)
+                    """);
             psLog.setLong(1, userId);
             psLog.setInt(2, materialId);
             psLog.setDouble(3, qtyToTake);
@@ -476,11 +483,11 @@ public class DatabaseManager {
 
             conn.commit();
             return String.format("""
-                    ✅ <b>Вы взяли со склада в подотчет:</b>
-                    • Наименование: <b>%s</b>
-                    • Инв. номер: <code>%s</code>
-                    • Количество: <b>%s %s</b>
-                    • Сумма (с НДС): <b>%s руб.</b> <i>(по %s за 1 %s)</i>""",
+                            ✅ <b>Вы взяли со склада в подотчет:</b>
+                            • Наименование: <b>%s</b>
+                            • Инв. номер: <code>%s</code>
+                            • Количество: <b>%s %s</b>
+                            • Сумма (с НДС): <b>%s руб.</b> <i>(по %s за 1 %s)</i>""",
                     name, code, fmtQty(qtyToTake), unit, fmtPrice(totalSum), fmtPrice(priceVat), unit);
         } catch (SQLException e) {
             e.printStackTrace();
@@ -493,12 +500,12 @@ public class DatabaseManager {
         boolean hasItems = false;
         try (Connection conn = getConnection();
              PreparedStatement ps = conn.prepareStatement("""
-                 SELECT m.code, m.name, m.work_unit, m.price_with_vat, b.quantity 
-                 FROM employee_balances b
-                 JOIN materials m ON b.material_id = m.id
-                 WHERE b.user_id = ? AND b.quantity > 0.00001
-                 ORDER BY m.name
-             """)) {
+                         SELECT m.code, m.name, m.work_unit, m.price_with_vat, b.quantity 
+                         FROM employee_balances b
+                         JOIN materials m ON b.material_id = m.id
+                         WHERE b.user_id = ? AND b.quantity > 0.00001
+                         ORDER BY m.name
+                     """)) {
             ps.setLong(1, userId);
             ResultSet rs = ps.executeQuery();
             while (rs.next()) {
@@ -528,13 +535,13 @@ public class DatabaseManager {
         try (Connection conn = getConnection();
              Statement stmt = conn.createStatement();
              ResultSet rs = stmt.executeQuery("""
-                 SELECT u.full_name, m.code, m.name, m.work_unit, m.price_with_vat, b.quantity
-                 FROM employee_balances b
-                 JOIN users u ON b.user_id = u.id
-                 JOIN materials m ON b.material_id = m.id
-                 WHERE b.quantity > 0.00001
-                 ORDER BY u.full_name, m.name
-             """)) {
+                         SELECT u.full_name, m.code, m.name, m.work_unit, m.price_with_vat, b.quantity
+                         FROM employee_balances b
+                         JOIN users u ON b.user_id = u.id
+                         JOIN materials m ON b.material_id = m.id
+                         WHERE b.quantity > 0.00001
+                         ORDER BY u.full_name, m.name
+                     """)) {
             String currentWorker = "";
             while (rs.next()) {
                 hasAny = true;
@@ -565,12 +572,12 @@ public class DatabaseManager {
         List<String[]> list = new ArrayList<>();
         try (Connection conn = getConnection();
              PreparedStatement ps = conn.prepareStatement("""
-                 SELECT m.id, m.code, m.name, m.work_unit, b.quantity
-                 FROM employee_balances b
-                 JOIN materials m ON b.material_id = m.id
-                 WHERE b.user_id = ? AND b.quantity > 0.00001
-                 ORDER BY m.name
-             """)) {
+                         SELECT m.id, m.code, m.name, m.work_unit, b.quantity
+                         FROM employee_balances b
+                         JOIN materials m ON b.material_id = m.id
+                         WHERE b.user_id = ? AND b.quantity > 0.00001
+                         ORDER BY m.name
+                     """)) {
             ps.setLong(1, userId);
             ResultSet rs = ps.executeQuery();
             while (rs.next()) {
@@ -611,12 +618,12 @@ public class DatabaseManager {
 
             double totalSumVat = Math.round(s.quantity * s.priceWithVat * 100.0) / 100.0;
             PreparedStatement psLog = conn.prepareStatement("""
-                INSERT INTO transactions (
-                    type, user_id, material_id, quantity, is_paid_receipt,
-                    receipt_number, phone_number, contract_number, subscriber_address,
-                    closing_code, write_off_reason, total_sum_with_vat
-                ) VALUES ('WRITE_OFF', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """);
+                        INSERT INTO transactions (
+                            type, user_id, material_id, quantity, is_paid_receipt,
+                            receipt_number, phone_number, contract_number, subscriber_address,
+                            closing_code, write_off_reason, total_sum_with_vat
+                        ) VALUES ('WRITE_OFF', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """);
             psLog.setLong(1, userId);
             psLog.setInt(2, s.materialId);
             psLog.setDouble(3, s.quantity);
@@ -634,29 +641,29 @@ public class DatabaseManager {
 
             if (s.isPaidReceipt) {
                 return String.format("""
-                        ✅ <b>Списание ПО КВИТАНЦИИ сохранено!</b>
-                        
-                        📦 Материал: <b>%s — %s %s</b>
-                        🧾 Квитанция: <b>%s</b>
-                        ☎️ Телефон заявки: <b>%s</b>
-                        📄 Номер договора: <b>%s</b>
-                        🏠 Адрес: <b>%s</b>
-                        
-                        💰 <b>Сумма материала для квитанции (с НДС): %.2f руб.</b>
-                        <i>(%s %s × %s руб.)</i>""",
+                                ✅ <b>Списание ПО КВИТАНЦИИ сохранено!</b>
+                                
+                                📦 Материал: <b>%s — %s %s</b>
+                                🧾 Квитанция: <b>%s</b>
+                                ☎️ Телефон заявки: <b>%s</b>
+                                📄 Номер договора: <b>%s</b>
+                                🏠 Адрес: <b>%s</b>
+                                
+                                💰 <b>Сумма материала для квитанции (с НДС): %.2f руб.</b>
+                                <i>(%s %s × %s руб.)</i>""",
                         s.materialName, fmtQty(s.quantity), s.unit,
                         s.receiptNumber, s.phoneNumber, s.contractNumber, s.address,
                         totalSumVat, fmtQty(s.quantity), s.unit, fmtPrice(s.priceWithVat));
             } else {
                 return String.format("""
-                        ✅ <b>Техническое списание (БЕЗ квитанции) сохранено!</b>
-                        
-                        📦 Материал: <b>%s — %s %s</b>
-                        🔢 Код закрытия: <b>%s</b>
-                        ☎️ Телефон заявки: <b>%s</b>
-                        📄 Номер договора: <b>%s</b>
-                        🏠 Адрес: <b>%s</b>
-                        🛠 Причина: <b>%s</b>""",
+                                ✅ <b>Техническое списание (БЕЗ квитанции) сохранено!</b>
+                                
+                                📦 Материал: <b>%s — %s %s</b>
+                                🔢 Код закрытия: <b>%s</b>
+                                ☎️ Телефон заявки: <b>%s</b>
+                                📄 Номер договора: <b>%s</b>
+                                🏠 Адрес: <b>%s</b>
+                                🛠 Причина: <b>%s</b>""",
                         s.materialName, fmtQty(s.quantity), s.unit,
                         s.closingCode, s.phoneNumber, s.contractNumber, s.address, s.reason);
             }
@@ -672,12 +679,12 @@ public class DatabaseManager {
 
         try (Connection conn = getConnection();
              PreparedStatement ps = conn.prepareStatement("""
-                 SELECT closing_code, write_off_date FROM write_offs 
-                 WHERE (phone_number = ? OR contract_number = ?) 
-                 AND closing_code != '227' 
-                 AND write_off_date >= date('now', '-6 month') 
-                 ORDER BY write_off_date DESC LIMIT 1
-             """)) {
+                         SELECT closing_code, write_off_date FROM write_offs 
+                         WHERE (phone_number = ? OR contract_number = ?) 
+                         AND closing_code != '227' 
+                         AND write_off_date >= date('now', '-6 month') 
+                         ORDER BY write_off_date DESC LIMIT 1
+                     """)) {
             ps.setString(1, phone);
             ps.setString(2, contract);
             ResultSet rs = ps.executeQuery();
@@ -686,7 +693,9 @@ public class DatabaseManager {
                 String date = rs.getString("write_off_date");
                 return "\n\n⚠️ <b>ОСТОРОЖНО:</b> По этому абоненту менее 6 мес. назад уже закрывалась заявка (код " + code + " от " + date + "). <b>Вы обязаны использовать код 227 (любой другой запрещен)!</b>";
             }
-        } catch (SQLException e) { e.printStackTrace(); }
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
         return "";
     }
 
@@ -716,6 +725,7 @@ public class DatabaseManager {
                 • <b>Код 217</b> — Переход на свободный запасной модуль и волокно в райзер-кабеле на участке ОРШ–ОРК (например, крыса повредила рабочий модуль, разварили свободный модуль на ОРК и ОРШ, из материалов — только гильзы КДЗС).
                 """;
     }
+
     // Информация о созданной заявке на возврат для отправки уведомления МОЛ
     public static class ReturnRequestInfo {
         public boolean success;
@@ -736,12 +746,12 @@ public class DatabaseManager {
         try (Connection conn = getConnection()) {
             // Проверяем, сколько материала у сотрудника на руках
             PreparedStatement psCheck = conn.prepareStatement("""
-                SELECT b.quantity, m.code, m.name, m.work_unit, u.full_name
-                FROM employee_balances b
-                JOIN materials m ON b.material_id = m.id
-                JOIN users u ON b.user_id = u.id
-                WHERE b.user_id = ? AND b.material_id = ?
-            """);
+                        SELECT b.quantity, m.code, m.name, m.work_unit, u.full_name
+                        FROM employee_balances b
+                        JOIN materials m ON b.material_id = m.id
+                        JOIN users u ON b.user_id = u.id
+                        WHERE b.user_id = ? AND b.material_id = ?
+                    """);
             psCheck.setLong(1, userId);
             psCheck.setInt(2, materialId);
             ResultSet rs = psCheck.executeQuery();
@@ -761,9 +771,9 @@ public class DatabaseManager {
             // Проверяем, сколько уже висит в неподтвержденных заявках на возврат
             double pendingQty = 0.0;
             try (PreparedStatement psPend = conn.prepareStatement("""
-                SELECT COALESCE(SUM(quantity), 0) FROM return_requests
-                WHERE user_id = ? AND material_id = ? AND status = 'PENDING'
-            """)) {
+                        SELECT COALESCE(SUM(quantity), 0) FROM return_requests
+                        WHERE user_id = ? AND material_id = ? AND status = 'PENDING'
+                    """)) {
                 psPend.setLong(1, userId);
                 psPend.setInt(2, materialId);
                 ResultSet rsP = psPend.executeQuery();
@@ -781,9 +791,9 @@ public class DatabaseManager {
 
             // Создаем заявку со статусом PENDING
             try (PreparedStatement psIns = conn.prepareStatement("""
-                INSERT INTO return_requests (user_id, material_id, quantity, status)
-                VALUES (?, ?, ?, 'PENDING')
-            """, Statement.RETURN_GENERATED_KEYS)) {
+                        INSERT INTO return_requests (user_id, material_id, quantity, status)
+                        VALUES (?, ?, ?, 'PENDING')
+                    """, Statement.RETURN_GENERATED_KEYS)) {
                 psIns.setLong(1, userId);
                 psIns.setInt(2, materialId);
                 psIns.setDouble(3, qtyToReturn);
@@ -796,23 +806,23 @@ public class DatabaseManager {
 
             info.success = true;
             info.messageForWorker = String.format("""
-                    ⏳ <b>Заявка на возврат №%d отправлена МОЛ!</b>
-                    
-                    • Материал: <b>%s</b> [<code>%s</code>]
-                    • Количество к возврату: <b>%s %s</b>
-                    
-                    <i>⚠️ Материал числится за вами до тех пор, пока МОЛ не подтвердит приемку на склад.</i>""",
+                            ⏳ <b>Заявка на возврат №%d отправлена МОЛ!</b>
+                            
+                            • Материал: <b>%s</b> [<code>%s</code>]
+                            • Количество к возврату: <b>%s %s</b>
+                            
+                            <i>⚠️ Материал числится за вами до тех пор, пока МОЛ не подтвердит приемку на склад.</i>""",
                     info.requestId, name, code, fmtQty(qtyToReturn), unit);
 
             info.messageForAdmin = String.format("""
-                    🔔 <b>Запрос на возврат материала на склад (№%d)</b>
-                    
-                    👤 Сотрудник: <b>%s</b>
-                    📦 Материал: <b>%s</b>
-                    🔢 Инв. №: <code>%s</code>
-                    ↩️ Количество к возврату: <b>%s %s</b>
-                    
-                    Подтверждаете приемку этого материала обратно на склад?""",
+                            🔔 <b>Запрос на возврат материала на склад (№%d)</b>
+                            
+                            👤 Сотрудник: <b>%s</b>
+                            📦 Материал: <b>%s</b>
+                            🔢 Инв. №: <code>%s</code>
+                            ↩️ Количество к возврату: <b>%s %s</b>
+                            
+                            Подтверждаете приемку этого материала обратно на склад?""",
                     info.requestId, workerName, name, code, fmtQty(qtyToReturn), unit);
 
             return info;
@@ -831,13 +841,13 @@ public class DatabaseManager {
             conn.setAutoCommit(false);
 
             PreparedStatement psReq = conn.prepareStatement("""
-                SELECT r.user_id, r.material_id, r.quantity, r.status,
-                       m.code, m.name, m.work_unit, m.price_with_vat, u.full_name
-                FROM return_requests r
-                JOIN materials m ON r.material_id = m.id
-                JOIN users u ON r.user_id = u.id
-                WHERE r.id = ?
-            """);
+                        SELECT r.user_id, r.material_id, r.quantity, r.status,
+                               m.code, m.name, m.work_unit, m.price_with_vat, u.full_name
+                        FROM return_requests r
+                        JOIN materials m ON r.material_id = m.id
+                        JOIN users u ON r.user_id = u.id
+                        WHERE r.id = ?
+                    """);
             psReq.setInt(1, requestId);
             ResultSet rs = psReq.executeQuery();
 
@@ -894,9 +904,9 @@ public class DatabaseManager {
 
             // 4. Записываем в журнал транзакций
             PreparedStatement psLog = conn.prepareStatement("""
-                INSERT INTO transactions (type, user_id, material_id, quantity, total_sum_with_vat, write_off_reason)
-                VALUES ('RETURN', ?, ?, ?, ?, 'Возврат на склад (подтверждено МОЛ)')
-            """);
+                        INSERT INTO transactions (type, user_id, material_id, quantity, total_sum_with_vat, write_off_reason)
+                        VALUES ('RETURN', ?, ?, ?, ?, 'Возврат на склад (подтверждено МОЛ)')
+                    """);
             psLog.setLong(1, workerId);
             psLog.setInt(2, materialId);
             psLog.setDouble(3, qty);
@@ -906,16 +916,16 @@ public class DatabaseManager {
             conn.commit();
 
             String msgAdmin = String.format("""
-                    ✅ <b>Возврат №%d подтвержден!</b>
-                    • Сотрудник: <b>%s</b>
-                    • Материал: <b>%s</b> [<code>%s</code>]
-                    • Возвращено на склад: <b>%s %s</b>""",
+                            ✅ <b>Возврат №%d подтвержден!</b>
+                            • Сотрудник: <b>%s</b>
+                            • Материал: <b>%s</b> [<code>%s</code>]
+                            • Возвращено на склад: <b>%s %s</b>""",
                     requestId, workerName, name, code, fmtQty(qty), unit);
 
             String msgWorker = String.format("""
-                    ✅ <b>МОЛ подтвердил ваш возврат (заявка №%d)!</b>
-                    • Материал: <b>%s</b> [<code>%s</code>]
-                    • Списано с вашего подотчета на склад: <b>%s %s</b>""",
+                            ✅ <b>МОЛ подтвердил ваш возврат (заявка №%d)!</b>
+                            • Материал: <b>%s</b> [<code>%s</code>]
+                            • Списано с вашего подотчета на склад: <b>%s %s</b>""",
                     requestId, name, code, fmtQty(qty), unit);
 
             return new String[]{"OK", String.valueOf(workerId), msgAdmin, msgWorker};
@@ -930,12 +940,12 @@ public class DatabaseManager {
     public static String[] rejectReturnRequest(int requestId) {
         try (Connection conn = getConnection()) {
             PreparedStatement psReq = conn.prepareStatement("""
-                SELECT r.user_id, r.quantity, r.status, m.code, m.name, m.work_unit, u.full_name
-                FROM return_requests r
-                JOIN materials m ON r.material_id = m.id
-                JOIN users u ON r.user_id = u.id
-                WHERE r.id = ?
-            """);
+                        SELECT r.user_id, r.quantity, r.status, m.code, m.name, m.work_unit, u.full_name
+                        FROM return_requests r
+                        JOIN materials m ON r.material_id = m.id
+                        JOIN users u ON r.user_id = u.id
+                        WHERE r.id = ?
+                    """);
             psReq.setInt(1, requestId);
             ResultSet rs = psReq.executeQuery();
 
@@ -961,13 +971,13 @@ public class DatabaseManager {
             psUpd.executeUpdate();
 
             String msgAdmin = String.format("""
-                    ❌ <b>Вы отклонили заявку на возврат №%d.</b>
-                    Материал <b>%s</b> (%s %s) остался в подотчете за сотрудником <b>%s</b>.""",
+                            ❌ <b>Вы отклонили заявку на возврат №%d.</b>
+                            Материал <b>%s</b> (%s %s) остался в подотчете за сотрудником <b>%s</b>.""",
                     requestId, name, fmtQty(qty), unit, workerName);
 
             String msgWorker = String.format("""
-                    ❌ <b>МОЛ отклонил вашу заявку на возврат №%d.</b>
-                    Материал <b>%s</b> [<code>%s</code>] в количестве <b>%s %s</b> остается в вашем подотчете.""",
+                            ❌ <b>МОЛ отклонил вашу заявку на возврат №%d.</b>
+                            Материал <b>%s</b> [<code>%s</code>] в количестве <b>%s %s</b> остается в вашем подотчете.""",
                     requestId, name, code, fmtQty(qty), unit);
 
             return new String[]{"OK", String.valueOf(workerId), msgAdmin, msgWorker};
@@ -977,6 +987,7 @@ public class DatabaseManager {
             return new String[]{"ERROR", "0", "❌ Ошибка базы данных при отклонении возврата."};
         }
     }
+
     // Получение списка всех администраторов (МОЛ) из базы данных для рассылки уведомлений
     public static List<Long> getAdminIds() {
         List<Long> admins = new ArrayList<>();
@@ -1041,7 +1052,9 @@ public class DatabaseManager {
              Statement stmt = conn.createStatement();
              ResultSet rs = stmt.executeQuery("SELECT DISTINCT excel_name FROM schedules ORDER BY excel_name")) {
             while (rs.next()) names.add(rs.getString("excel_name"));
-        } catch (SQLException e) { e.printStackTrace(); }
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
         return names;
     }
 
@@ -1052,7 +1065,9 @@ public class DatabaseManager {
             ps.setLong(1, userId);
             ps.setString(2, excelName);
             ps.executeUpdate();
-        } catch (SQLException e) { e.printStackTrace(); }
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
     }
 
     public static String getUserExcelName(long userId) {
@@ -1061,7 +1076,9 @@ public class DatabaseManager {
             ps.setLong(1, userId);
             ResultSet rs = ps.executeQuery();
             if (rs.next()) return rs.getString("excel_name");
-        } catch (SQLException e) { e.printStackTrace(); }
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
         return null;
     }
 
@@ -1101,60 +1118,84 @@ public class DatabaseManager {
         }
     }
 
-    // Сформировать красивый график для сотрудника с днями недели
     public static String getFormattedSchedule(String excelName) {
-        String month = "текущий месяц";
-        int year = java.time.LocalDate.now().getYear();
-        int monthNum = java.time.LocalDate.now().getMonthValue();
-
+        StringBuilder sb = new StringBuilder();
         try (Connection conn = getConnection();
-             PreparedStatement ps = conn.prepareStatement("SELECT month_name, year_val FROM schedules WHERE excel_name = ? LIMIT 1")) {
+             PreparedStatement ps = conn.prepareStatement("""
+                         SELECT month_name, year_val, day_num, start_time, end_time, status_code 
+                         FROM schedules 
+                         WHERE excel_name = ? 
+                         ORDER BY day_num ASC
+                     """)) {
             ps.setString(1, excelName);
             ResultSet rs = ps.executeQuery();
-            if (rs.next()) {
-                month = rs.getString("month_name");
-                year = rs.getInt("year_val");
-                monthNum = getMonthNumber(month);
-            }
-        } catch (SQLException e) {}
 
-        StringBuilder sb = new StringBuilder("🗓 <b>Ваш график на ").append(month.toUpperCase()).append(" ").append(year).append(" г. (").append(excelName).append("):</b>\n\n");
-        boolean found = false;
+            int weekNumber = 1;
+            int counter = 0;
+            boolean hasData = false;
 
-        try (Connection conn = getConnection();
-             PreparedStatement ps = conn.prepareStatement("SELECT day_num, start_time, end_time, status_code FROM schedules WHERE excel_name = ? ORDER BY day_num")) {
-            ps.setString(1, excelName);
-            ResultSet rs = ps.executeQuery();
             while (rs.next()) {
-                found = true;
-                int day = rs.getInt("day_num");
-                String status = rs.getString("status_code");
-
-                String dow = getDayOfWeekRu(year, monthNum, day);
-                // Делаем выходные (Сб, Вс) жирными, чтобы они выделялись
-                if (dow.equals("Сб") || dow.equals("Вс")) dow = "<u>" + dow + "</u>";
-
-                String dayPrefix = String.format("<b>%s, %02d число</b>", dow, day);
-
-                if ("В".equals(status)) {
-                    sb.append("🏖 ").append(dayPrefix).append(" — Выходной\n");
-                } else if ("О".equals(status)) {
-                    sb.append("🌴 ").append(dayPrefix).append(" — Отпуск\n");
-                } else if ("Д".equals(status)) {
-                    sb.append("🚨 ").append(dayPrefix).append(" — Дежурство\n");
-                } else {
-                    String start = rs.getString("start_time");
-                    String end = rs.getString("end_time");
-                    String emo = "🟦";
-                    if (start.startsWith("08")) emo = "🟩"; // Утро
-                    else if (start.startsWith("12") || start.startsWith("13")) emo = "🟧"; // Вторая смена
-
-                    sb.append(emo).append(" ").append(dayPrefix).append(" — ").append(start).append(" - ").append(end).append("\n");
+                if (!hasData) {
+                    // Пишем заголовок только один раз
+                    String month = rs.getString("month_name");
+                    int year = rs.getInt("year_val");
+                    sb.append(String.format("🗓 <b>Ваш график на %s %d г.</b>\n", month, year));
+                    sb.append(String.format("👤 Сотрудник: <b>%s</b>\n\n", excelName));
+                    sb.append(String.format("➖ <b>Неделя %d</b> ➖➖➖➖➖➖\n", weekNumber));
+                    hasData = true;
                 }
-            }
-        } catch (SQLException e) { e.printStackTrace(); }
 
-        if (!found) return "ℹ️ График для <b>" + excelName + "</b> пока не загружен. Обратитесь к МОЛ.";
+                int dayNum = rs.getInt("day_num");
+                int year = rs.getInt("year_val");
+                String monthName = rs.getString("month_name");
+                int monthNum = getMonthNumber(monthName);
+                String dayOfWeek = getDayOfWeekRu(year, monthNum, dayNum);
+
+                String start = rs.getString("start_time");
+                String end = rs.getString("end_time");
+                String statusCode = rs.getString("status_code");
+
+                // Формируем диапазон времени
+                String timeRange = "";
+                if (start != null && !start.isEmpty() && end != null && !end.isEmpty()) {
+                    timeRange = start + " - " + end;
+                }
+
+                // Каждые 7 дней делаем разделитель новой недели
+                if (counter > 0 && counter % 7 == 0) {
+                    weekNumber++;
+                    sb.append(String.format("\n➖ <b>Неделя %d</b> ➖➖➖➖➖➖\n", weekNumber));
+                }
+
+                String line;
+                if ("В".equals(statusCode)) {
+                    line = String.format("🏖 <u><b>%s, %02d</b></u> — Выходной", dayOfWeek, dayNum);
+                } else if ("Д".equals(statusCode)) {
+                    line = String.format("🚨 <b>%s, %02d</b> — Дежурство", dayOfWeek, dayNum);
+                } else if ("О".equals(statusCode)) {
+                    line = String.format("🌴 <b>%s, %02d</b> — Отпуск", dayOfWeek, dayNum);
+                } else {
+                    String icon = "🟩"; // По умолчанию утренняя смена
+                    // Если смена начинается с 11, 12, 13 или 14 часов — это вторая смена
+                    if (start != null && (start.startsWith("11:") || start.startsWith("12:") ||
+                            start.startsWith("13:") || start.startsWith("14:"))) {
+                        icon = "🟧";
+                    }
+                    line = String.format("%s <b>%s, %02d</b> — %s", icon, dayOfWeek, dayNum, timeRange);
+                }
+
+                sb.append(line).append("\n");
+                counter++;
+            }
+
+            if (!hasData) {
+                return "ℹ️ График для сотрудника <b>" + excelName + "</b> не найден в базе. Попросите администратора загрузить файл.";
+            }
+
+        } catch (SQLException e) {
+            e.printStackTrace();
+            return "❌ Ошибка при чтении графика из базы данных.";
+        }
         return sb.toString();
     }
     // ==========================================
@@ -1191,7 +1232,9 @@ public class DatabaseManager {
                         String.valueOf(rs.getDouble("price_with_vat"))
                 });
             }
-        } catch (SQLException e) { e.printStackTrace(); }
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
         return list;
     }
 
@@ -1211,7 +1254,9 @@ public class DatabaseManager {
                 item.isSingle = rs.getInt("is_single") == 1; // <-- Считываем из БД
                 return item;
             }
-        } catch (SQLException e) { e.printStackTrace(); }
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
         return null;
     }
 
@@ -1219,11 +1264,11 @@ public class DatabaseManager {
     public static ReceiptItem getMaterialFromBalanceById(long userId, int materialId) {
         try (Connection conn = getConnection();
              PreparedStatement ps = conn.prepareStatement("""
-                 SELECT m.name, m.work_unit, m.price_with_vat 
-                 FROM employee_balances b
-                 JOIN materials m ON b.material_id = m.id
-                 WHERE b.user_id = ? AND m.id = ? AND b.quantity > 0.00001
-             """)) {
+                         SELECT m.name, m.work_unit, m.price_with_vat 
+                         FROM employee_balances b
+                         JOIN materials m ON b.material_id = m.id
+                         WHERE b.user_id = ? AND m.id = ? AND b.quantity > 0.00001
+                     """)) {
             ps.setLong(1, userId);
             ps.setInt(2, materialId);
             ResultSet rs = ps.executeQuery();
@@ -1236,7 +1281,9 @@ public class DatabaseManager {
                 item.isMaterial = true;
                 return item;
             }
-        } catch (SQLException e) { e.printStackTrace(); }
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
         return null;
     }
 
@@ -1313,5 +1360,80 @@ public class DatabaseManager {
         sb.append(String.format("💰 <b>ВСЕГО К ОПЛАТЕ: %.2f руб.</b>", finalSum));
 
         return sb.toString();
+    }
+    // Получить список ID всех пользователей, у которых есть материалы на руках
+    public static List<Long> getUsersWithBalances() {
+        List<Long> users = new ArrayList<>();
+        try (Connection conn = getConnection();
+             Statement stmt = conn.createStatement();
+             ResultSet rs = stmt.executeQuery(
+                     "SELECT DISTINCT user_id FROM employee_balances WHERE quantity > 0.00001"
+             )) {
+            while (rs.next()) {
+                users.add(rs.getLong("user_id"));
+            }
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
+        return users;
+    }
+    // Получить список ID всех зарегистрированных пользователей бота (для рассылки)
+    public static List<Long> getAllUserIds() {
+        List<Long> users = new ArrayList<>();
+        try (Connection conn = getConnection();
+             Statement stmt = conn.createStatement();
+             ResultSet rs = stmt.executeQuery("SELECT id FROM users")) {
+            while (rs.next()) {
+                users.add(rs.getLong("id"));
+            }
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
+        return users;
+    }
+    // Вывод списка всех пользователей с командами для блокировки
+    public static String getUsersListText() {
+        StringBuilder sb = new StringBuilder("👥 <b>Список пользователей бота:</b>\n\n");
+        try (Connection conn = getConnection();
+             Statement stmt = conn.createStatement();
+             ResultSet rs = stmt.executeQuery("SELECT id, full_name, role FROM users")) {
+            while (rs.next()) {
+                long id = rs.getLong("id");
+                String role = rs.getString("role");
+
+                String status = switch (role) {
+                    case "BANNED" -> "🚫 ЗАБЛОКИРОВАН";
+                    case "ADMIN" -> "👑 АДМИН";
+                    case "PENDING" -> "⏳ ОЖИДАЕТ ОДОБРЕНИЯ";
+                    default -> "👷‍♂️ МАСТЕР";
+                };
+
+                sb.append(String.format("👤 <b>%s</b>\n   ID: <code>%d</code>\n   Статус: %s\n", rs.getString("full_name"), id, status));
+
+                // СНАЧАЛА проверяем на бан и ожидание
+                if ("BANNED".equals(role) || "PENDING".equals(role)) {
+                    sb.append(String.format("   Разблокировать/Одобрить: /unban_%d\n", id));
+                }
+                // А ЗАТЕМ уже выводим кнопку блокировки для всех обычных мастеров (не админов)
+                else if (!"ADMIN".equals(role)) {
+                    sb.append(String.format("   Блокировать: /ban_%d\n", id));
+                }
+                sb.append("\n");
+            }
+        } catch (SQLException e) { e.printStackTrace(); }
+        return sb.toString();
+    }
+
+    // Блокировка или разблокировка пользователя
+    public static String setBanStatus(long targetUserId, boolean ban) {
+        String newRole = ban ? "BANNED" : "WORKER";
+        try (Connection conn = getConnection();
+             PreparedStatement ps = conn.prepareStatement("UPDATE users SET role = ? WHERE id = ? AND role != 'ADMIN'")) {
+            ps.setString(1, newRole);
+            ps.setLong(2, targetUserId);
+            int updated = ps.executeUpdate();
+            if (updated > 0) return ban ? "✅ Пользователь " + targetUserId + " заблокирован. Бот больше не будет ему отвечать." : "✅ Пользователь разблокирован.";
+            return "❌ Пользователь не найден или это администратор (которого нельзя заблокировать).";
+        } catch (SQLException e) { return "❌ Ошибка базы данных."; }
     }
 }

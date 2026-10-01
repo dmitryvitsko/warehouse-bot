@@ -49,7 +49,9 @@ public class WarehouseBot extends TelegramLongPollingBot {
     public void onUpdateReceived(Update update) {
         if (update.hasMessage() && update.getMessage().hasDocument()) {
             long chatId = update.getMessage().getChatId();
-            String role = DatabaseManager.getUserRole(chatId, update.getMessage().getFrom().getFirstName());
+            String firstName = update.getMessage().getFrom().getFirstName();
+            String role = checkRoleAndNotify(chatId, firstName);
+            if ("BANNED".equals(role) || "PENDING".equals(role)) return;
 
             if (!"ADMIN".equals(role)) {
                 sendMenu(chatId, role, "❌ Загружать файлы может только Администратор (МОЛ).");
@@ -96,7 +98,24 @@ public class WarehouseBot extends TelegramLongPollingBot {
             long chatId = update.getCallbackQuery().getMessage().getChatId();
             String data = update.getCallbackQuery().getData();
             String firstName = update.getCallbackQuery().getFrom().getFirstName();
-            String role = DatabaseManager.getUserRole(chatId, firstName);
+            String role = checkRoleAndNotify(chatId, firstName);
+
+            // Обработка кнопок одобрения/отклонения от МОЛ
+            if (data.startsWith("NEW_USER_APP:") && "ADMIN".equals(role)) {
+                long targetId = Long.parseLong(data.split(":")[1]);
+                DatabaseManager.setBanStatus(targetId, false); // Одобряем (переводим в WORKER)
+                sendMenu(chatId, role, "✅ Пользователь " + targetId + " одобрен и получил доступ.");
+                sendDirectNotification(targetId, "✅ <b>Администратор одобрил ваш доступ!</b>\nТеперь вы можете пользоваться ботом. Нажмите /start для обновления меню.");
+                return;
+            }
+            if (data.startsWith("NEW_USER_REJ:") && "ADMIN".equals(role)) {
+                long targetId = Long.parseLong(data.split(":")[1]);
+                DatabaseManager.setBanStatus(targetId, true); // Блокируем
+                sendMenu(chatId, role, "❌ Пользователь " + targetId + " заблокирован.");
+                return;
+            }
+
+            if ("BANNED".equals(role) || "PENDING".equals(role)) return;
 
             // --- КАЛЬКУЛЯТОР КВИТАНЦИЙ ---
             if (data.equals("CART_MENU")) {
@@ -266,11 +285,20 @@ public class WarehouseBot extends TelegramLongPollingBot {
             long chatId = update.getMessage().getChatId();
             String firstName = update.getMessage().getFrom().getFirstName();
             String text = update.getMessage().getText();
-            String role = DatabaseManager.getUserRole(chatId, firstName);
+            String role = checkRoleAndNotify(chatId, firstName);
+
+            if ("BANNED".equals(role)) return;
+            if ("PENDING".equals(role)) {
+                if (text.equals("/start")) {
+                    sendDirectNotification(chatId, "⏳ Ваша заявка все еще находится на рассмотрении администратора.");
+                }
+                return;
+            }
 
             if (text.equals("❌ Отменить")) {
                 waitingTakeMaterialId.remove(chatId);
                 writeOffSessions.remove(chatId);
+                fileWaitState.remove(chatId);
                 sendMenu(chatId, role, "🚫 <b>Действие отменено.</b>");
                 return;
             }
@@ -292,7 +320,8 @@ public class WarehouseBot extends TelegramLongPollingBot {
             if (text.startsWith("📦") || text.startsWith("🧰") || text.startsWith("📝") ||
                     text.startsWith("📋") || text.startsWith("🔢") ||
                     text.startsWith("📊") || text.startsWith("📥") || text.startsWith("📑") ||
-                    text.startsWith("🗓") || text.equals("/start")) {
+                    text.startsWith("🗓") || text.startsWith("🔍") || text.startsWith("📢") ||
+                    text.startsWith("👥") || text.equals("/start")) {
                 waitingTakeMaterialId.remove(chatId);
                 writeOffSessions.remove(chatId);
                 fileWaitState.remove(chatId);
@@ -344,9 +373,45 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 return;
             }
 
+            // Обработка текста для массовой рассылки
+            if ("WAIT_BROADCAST_TEXT".equals(fileWaitState.get(chatId))) {
+                fileWaitState.remove(chatId);
+                sendMenu(chatId, role, "⏳ Отправляю сообщение всем сотрудникам...");
+
+                List<Long> allUsers = DatabaseManager.getAllUserIds();
+                int successCount = 0;
+                String broadcastMsg = "📢 <b>ИНФОРМАЦИЯ ОТ РУКОВОДИТЕЛЯ:</b>\n\n" + text;
+
+                for (Long userId : allUsers) {
+                    if (userId == chatId) continue; // Себе не отправляем
+                    try {
+                        SendMessage msg = new SendMessage(String.valueOf(userId), broadcastMsg);
+                        msg.setParseMode("HTML");
+                        execute(msg);
+                        successCount++;
+                    } catch (TelegramApiException e) {
+                        // Пользователь мог заблокировать бота
+                    }
+                }
+                sendMenu(chatId, role, "✅ Рассылка успешно доставлена <b>" + successCount + "</b> сотрудникам!");
+                return;
+            }
+
+            if (text.startsWith("/ban_") && "ADMIN".equals(role)) {
+                long targetId = Long.parseLong(text.replace("/ban_", ""));
+                sendMenu(chatId, role, DatabaseManager.setBanStatus(targetId, true));
+                return;
+            }
+
+            if (text.startsWith("/unban_") && "ADMIN".equals(role)) {
+                long targetId = Long.parseLong(text.replace("/unban_", ""));
+                sendMenu(chatId, role, DatabaseManager.setBanStatus(targetId, false));
+                return;
+            }
+
             switch (text) {
                 case "/start" -> {
-                    String roleTitle = role.equals("ADMIN") ? "Администратор (МОЛ)" : "Мастер бюро ремонта";
+                    String roleTitle = role.equals("ADMIN") ? "Администратор (МОЛ)" : "Мастер ЦБР УЛКС №2 ЛКЦ";
                     sendMenu(chatId, role, "Привет, <b>" + firstName + "</b>! 👋\n"
                             + "Ваша роль в системе: <b>" + roleTitle + "</b>.\n\n"
                             + "Выберите нужное действие на кнопках внизу экрана:");
@@ -399,6 +464,40 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 }
                 case "📑 Скачать отчет за месяц" -> {
                     if (role.equals("ADMIN")) sendExcelReport(chatId, role);
+                }
+                case "🔍 Аудит остатков" -> {
+                    if (role.equals("ADMIN")) {
+                        sendMenu(chatId, role, "⏳ Начинаю рассылку уведомлений...");
+                        List<Long> workersWithMaterials = DatabaseManager.getUsersWithBalances();
+                        int successCount = 0;
+
+                        for (Long workerId : workersWithMaterials) {
+                            String balanceText = DatabaseManager.getUserBalanceText(workerId);
+                            String alertMsg = "⚠️ <b>ВНИМАНИЕ: АУДИТ ОСТАТКОВ!</b> ⚠️\n\n"
+                                    + "Напоминаем о необходимости закрыть подотчет до конца месяца. "
+                                    + "Пожалуйста, <b>спишите</b> использованные материалы в квитанции/заявки "
+                                    + "или <b>верните</b> остатки на склад!\n\n"
+                                    + balanceText;
+                            try {
+                                SendMessage msg = new SendMessage(String.valueOf(workerId), alertMsg);
+                                msg.setParseMode("HTML");
+                                execute(msg);
+                                successCount++;
+                            } catch (TelegramApiException e) {
+                                // Пользователь мог заблокировать бота, просто пропускаем
+                            }
+                        }
+                        sendMenu(chatId, role, "✅ Уведомления об аудите успешно доставлены <b>" + successCount + "</b> сотрудникам!");
+                    }
+                }
+                case "📢 Сделать рассылку" -> {
+                    if (role.equals("ADMIN")) {
+                        fileWaitState.put(chatId, "WAIT_BROADCAST_TEXT");
+                        sendCancelKeyboard(chatId, "📢 <b>Режим массовой рассылки</b>\n\nВведите текст сообщения, которое хотите отправить <b>всем сотрудникам</b>. Вы можете использовать смайлы, переносы строк и ссылки.\n\n<i>Для отмены нажмите кнопку «❌ Отменить».</i>");
+                    }
+                }
+                case "👥 Пользователи" -> {
+                    if (role.equals("ADMIN")) sendMenu(chatId, role, DatabaseManager.getUsersListText());
                 }
                 default -> {
                     if (text.startsWith("+услуга ") && role.equals("ADMIN")) handleUpdateService(chatId, role, text);
@@ -861,11 +960,45 @@ public class WarehouseBot extends TelegramLongPollingBot {
             adminRow2.add("📑 Скачать отчет за месяц");
             adminRow2.add("📥 Загрузить график (Excel)");
             keyboard.add(adminRow2);
+
+            KeyboardRow adminRow3 = new KeyboardRow();
+            adminRow3.add("🔍 Аудит остатков");
+            adminRow3.add("📢 Сделать рассылку");
+            adminRow3.add("👥 Пользователи");
+            keyboard.add(adminRow3);
         }
 
         keyboardMarkup.setKeyboard(keyboard);
         message.setReplyMarkup(keyboardMarkup);
 
         try { execute(message); } catch (TelegramApiException e) { e.printStackTrace(); }
+    }
+    private String checkRoleAndNotify(long chatId, String firstName) {
+        String role = DatabaseManager.getUserRole(chatId, firstName);
+        if ("NEW_PENDING".equals(role)) {
+            sendNewUserRequestToAdmins(chatId, firstName);
+            SendMessage msg = new SendMessage(String.valueOf(chatId), "⏳ <b>Ваша заявка отправлена.</b>\nОжидайте подтверждения доступа администратором.");
+            msg.setParseMode("HTML");
+            try { execute(msg); } catch (TelegramApiException e) { e.printStackTrace(); }
+            return "PENDING";
+        }
+        return role;
+    }
+
+    private void sendNewUserRequestToAdmins(long newUserId, String newUserName) {
+        InlineKeyboardButton btnApprove = new InlineKeyboardButton("✅ Одобрить (Мастер)");
+        btnApprove.setCallbackData("NEW_USER_APP:" + newUserId);
+        InlineKeyboardButton btnReject = new InlineKeyboardButton("❌ Заблокировать");
+        btnReject.setCallbackData("NEW_USER_REJ:" + newUserId);
+        InlineKeyboardMarkup markup = new InlineKeyboardMarkup(List.of(List.of(btnApprove, btnReject)));
+
+        String text = String.format("👤 <b>Новый пользователь хочет получить доступ к боту!</b>\n\nИмя: <b>%s</b>\nID: <code>%d</code>\n\nРазрешить доступ?", newUserName, newUserId);
+
+        for (Long adminId : DatabaseManager.getAdminIds()) {
+            SendMessage msg = new SendMessage(String.valueOf(adminId), text);
+            msg.setParseMode("HTML");
+            msg.setReplyMarkup(markup);
+            try { execute(msg); } catch (TelegramApiException e) { e.printStackTrace(); }
+        }
     }
 }

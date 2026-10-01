@@ -1392,6 +1392,7 @@ public class DatabaseManager {
         return users;
     }
     // Вывод списка всех пользователей с командами для блокировки
+    // Вывод списка всех пользователей с командами для блокировки
     public static String getUsersListText() {
         StringBuilder sb = new StringBuilder("👥 <b>Список пользователей бота:</b>\n\n");
         try (Connection conn = getConnection();
@@ -1408,7 +1409,9 @@ public class DatabaseManager {
                     default -> "👷‍♂️ МАСТЕР";
                 };
 
-                sb.append(String.format("👤 <b>%s</b>\n   ID: <code>%d</code>\n   Статус: %s\n", rs.getString("full_name"), id, status));
+                // Добавлена строка "Связь: Написать в ЛС" с глубокой ссылкой Telegram
+                sb.append(String.format("👤 <b>%s</b>\n   ID: <code>%d</code>\n   Связь: <a href=\"tg://user?id=%d\">Написать в ЛС</a>\n   Статус: %s\n",
+                        rs.getString("full_name"), id, id, status));
 
                 // СНАЧАЛА проверяем на бан и ожидание
                 if ("BANNED".equals(role) || "PENDING".equals(role)) {

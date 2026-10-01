@@ -50,6 +50,13 @@
             <version>2.0.12</version>
         </dependency>
 
+        <!-- Библиотека для отправки email -->
+        <dependency>
+            <groupId>com.sun.mail</groupId>
+            <artifactId>javax.mail</artifactId>
+            <version>1.6.2</version>
+        </dependency>
+
         <!-- Переходник логгера для Apache POI (убирает ошибку StatusLogger Log4j2) -->
         <dependency>
             <groupId>org.apache.logging.log4j</groupId>

@@ -227,6 +227,20 @@ public class DatabaseManager {
                 stmt.execute("ALTER TABLE tools ADD COLUMN written_off_at DATETIME;");
             } catch (SQLException ignored) {}
 
+            // 8. Таблица планового осмотра ОРШ
+            stmt.execute("""
+                CREATE TABLE IF NOT EXISTS orsh_inspections (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    orsh_number TEXT NOT NULL,
+                    address TEXT NOT NULL,
+                    location TEXT NOT NULL,
+                    status TEXT DEFAULT 'PENDING',
+                    reason TEXT,
+                    inspected_by TEXT,
+                    inspected_at DATETIME
+                );
+            """);
+
             System.out.println("✅ База данных warehouse.db и все таблицы успешно готовы к работе!");
 
         } catch (SQLException e) {
@@ -1411,7 +1425,6 @@ public class DatabaseManager {
         return users;
     }
     // Вывод списка всех пользователей с командами для блокировки
-    // Вывод списка всех пользователей с командами для блокировки
     public static String getUsersListText() {
         StringBuilder sb = new StringBuilder("👥 <b>Список пользователей бота:</b>\n\n");
         try (Connection conn = getConnection();
@@ -1807,5 +1820,108 @@ public class DatabaseManager {
             e.printStackTrace();
             return "❌ Ошибка базы данных при восстановлении.";
         }
+    }
+    // ==========================================
+    // ЛОГИКА ПЛАНОВОГО ОСМОТРА ОРШ
+    // ==========================================
+
+    public static class ParsedOrsh {
+        public String number;
+        public String address;
+        public String location;
+    }
+
+    // Сохранение нового плана осмотра (старый удаляется)
+    public static String saveImportedOrsh(List<ParsedOrsh> list) {
+        try (Connection conn = getConnection()) {
+            conn.setAutoCommit(false);
+            try (Statement stmt = conn.createStatement()) {
+                stmt.execute("DELETE FROM orsh_inspections");
+            }
+
+            String sql = "INSERT INTO orsh_inspections (orsh_number, address, location) VALUES (?, ?, ?)";
+            try (PreparedStatement ps = conn.prepareStatement(sql)) {
+                for (ParsedOrsh o : list) {
+                    ps.setString(1, o.number);
+                    ps.setString(2, o.address);
+                    ps.setString(3, o.location);
+                    ps.executeUpdate();
+                }
+            }
+            conn.commit();
+            return "✅ <b>План осмотра ОРШ успешно загружен!</b>\nДобавлено шкафов: <b>" + list.size() + "</b> шт.";
+        } catch (SQLException e) {
+            e.printStackTrace();
+            return "❌ Ошибка при сохранении плана ОРШ.";
+        }
+    }
+
+    // Получить список шкафов, которые еще не проверены
+    public static List<String[]> getPendingOrshList() {
+        List<String[]> list = new ArrayList<>();
+        try (Connection conn = getConnection();
+             Statement stmt = conn.createStatement();
+             ResultSet rs = stmt.executeQuery("SELECT id, orsh_number, address FROM orsh_inspections WHERE status = 'PENDING' ORDER BY id")) {
+            while (rs.next()) {
+                list.add(new String[]{ rs.getString("id"), rs.getString("orsh_number"), rs.getString("address") });
+            }
+        } catch (SQLException e) { e.printStackTrace(); }
+        return list;
+    }
+
+    // Получить данные конкретного шкафа
+    public static String[] getOrshById(int id) {
+        try (Connection conn = getConnection();
+             PreparedStatement ps = conn.prepareStatement("SELECT orsh_number, address, location FROM orsh_inspections WHERE id = ?")) {
+            ps.setInt(1, id);
+            ResultSet rs = ps.executeQuery();
+            if (rs.next()) {
+                return new String[]{ rs.getString("orsh_number"), rs.getString("address"), rs.getString("location") };
+            }
+        } catch (SQLException e) { e.printStackTrace(); }
+        return null;
+    }
+
+    // Отметить шкаф как проверенный или проблемный
+    public static void markOrshCompleted(int id, String workerName, boolean isProblem, String reason) {
+        String status = isProblem ? "PROBLEM" : "COMPLETED";
+        try (Connection conn = getConnection();
+             PreparedStatement ps = conn.prepareStatement(
+                     "UPDATE orsh_inspections SET status = ?, reason = ?, inspected_by = ?, inspected_at = datetime('now', 'localtime') WHERE id = ?")) {
+            ps.setString(1, status);
+            ps.setString(2, reason);
+            ps.setString(3, workerName);
+            ps.setInt(4, id);
+            ps.executeUpdate();
+        } catch (SQLException e) { e.printStackTrace(); }
+    }
+
+    // Сводка для админа
+    public static String getOrshStatistics() {
+        StringBuilder sb = new StringBuilder("📊 <b>Статистика осмотра ОРШ:</b>\n\n");
+        try (Connection conn = getConnection(); Statement stmt = conn.createStatement()) {
+            ResultSet rs = stmt.executeQuery(
+                    "SELECT status, COUNT(*) as cnt FROM orsh_inspections GROUP BY status");
+            int total = 0, completed = 0, pending = 0, problem = 0;
+            while (rs.next()) {
+                int count = rs.getInt("cnt");
+                total += count;
+                switch (rs.getString("status")) {
+                    case "COMPLETED" -> completed = count;
+                    case "PENDING" -> pending = count;
+                    case "PROBLEM" -> problem = count;
+                }
+            }
+            sb.append(String.format("Всего в плане: <b>%d шт.</b>\n✅ Проверено: <b>%d шт.</b>\n⏳ Осталось: <b>%d шт.</b>\n⚠️ Проблемные: <b>%d шт.</b>\n\n", total, completed, pending, problem));
+
+            if (problem > 0) {
+                sb.append("🚨 <b>Проблемные ОРШ:</b>\n");
+                ResultSet rp = stmt.executeQuery("SELECT orsh_number, reason, inspected_by FROM orsh_inspections WHERE status = 'PROBLEM'");
+                while (rp.next()) {
+                    sb.append(String.format("• <b>%s</b> — %s <i>(%s)</i>\n", rp.getString("orsh_number"), rp.getString("reason"), rp.getString("inspected_by")));
+                }
+            }
+        } catch (SQLException e) { e.printStackTrace(); }
+        return sb.toString();
     }
 }

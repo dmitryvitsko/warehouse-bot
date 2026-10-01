@@ -27,6 +27,8 @@ public class WarehouseBot extends TelegramLongPollingBot {
     private final Map<Long, WriteOffSession> writeOffSessions = new HashMap<>();
     private final Map<Long, String> fileWaitState = new HashMap<>();
     private final Map<Long, Integer> waitingToolWriteOffReason = new HashMap<>();
+    private final Map<Long, Integer> waitingOrshPhoto = new HashMap<>();
+    private final Map<Long, Integer> waitingOrshProblemReason = new HashMap<>();
 
     private static final Properties config = new Properties();
     static {
@@ -85,6 +87,8 @@ public class WarehouseBot extends TelegramLongPollingBot {
                     result = ExcelImporter.importScheduleSheet(localFile);
                 } else if ("TOOLS".equals(state)) {
                     result = ExcelImporter.importToolsSheet(localFile);
+                } else if ("ORSH".equals(state)) {
+                    result = ExcelImporter.importOrshSheet(localFile);
                 } else {
                     result = "❌ Неизвестное состояние загрузки файла.";
                 }
@@ -99,11 +103,67 @@ public class WarehouseBot extends TelegramLongPollingBot {
             return;
         }
 
+        if (update.hasMessage() && update.getMessage().hasPhoto()) {
+            long chatId = update.getMessage().getChatId();
+            String firstName = update.getMessage().getFrom().getFirstName();
+            String role = checkRoleAndNotify(chatId, firstName);
+
+            if (waitingOrshPhoto.containsKey(chatId)) {
+                int orshId = waitingOrshPhoto.remove(chatId);
+                sendMenu(chatId, role, "⏳ Скачиваю фото и отправляю на почту руководству...");
+
+                try {
+                    // Берем фото максимального качества (оно всегда последнее в списке)
+                    var photos = update.getMessage().getPhoto();
+                    String fileId = photos.get(photos.size() - 1).getFileId();
+                    GetFile getFile = new GetFile(fileId);
+                    org.telegram.telegrambots.meta.api.objects.File tgFile = execute(getFile);
+                    File localFile = downloadFile(tgFile);
+
+                    // Достаем данные шкафа из базы
+                    String[] orsh = DatabaseManager.getOrshById(orshId);
+                    String subject = "Осмотр ОРШ-" + orsh[0] + " (" + firstName + ")";
+                    String textBody = String.format("Плановый осмотр ОРШ\n\nНомер: %s\nАдрес: %s\nМестоположение: %s\n\nВыполнил: %s",
+                            orsh[0], orsh[1], orsh[2], firstName);
+
+                    // Переименовываем файл для удобства
+                    File renamedFile = new File(localFile.getParent(), "ORSH_" + orsh[0] + "_" + firstName + ".jpg");
+                    localFile.renameTo(renamedFile);
+
+                    // Отправляем письмо!
+                    EmailSender.sendOrshReport(subject, textBody, renamedFile);
+
+                    // Удаляем файл с компьютера и закрываем шкаф в базе
+                    renamedFile.delete();
+                    DatabaseManager.markOrshCompleted(orshId, firstName, false, "ОК");
+
+                    sendMenu(chatId, role, "✅ <b>Фото успешно отправлено!</b>\nОРШ-" + orsh[0] + " вычеркнут из плана осмотра.");
+                } catch (Exception e) {
+                    e.printStackTrace();
+                    sendMenu(chatId, role, "❌ Ошибка при отправке фото: " + e.getMessage());
+                }
+                return;
+            }
+        }
+
         if (update.hasCallbackQuery()) {
             long chatId = update.getCallbackQuery().getMessage().getChatId();
             String data = update.getCallbackQuery().getData();
             String firstName = update.getCallbackQuery().getFrom().getFirstName();
             String role = checkRoleAndNotify(chatId, firstName);
+
+            if (data.startsWith("ORSH_SEL:")) {
+                int orshId = Integer.parseInt(data.split(":")[1]);
+                sendOrshDetails(chatId, orshId);
+                return;
+            }
+            if (data.startsWith("ORSH_PROB:")) {
+                int orshId = Integer.parseInt(data.split(":")[1]);
+                waitingOrshPhoto.remove(chatId); // Отменяем режим ожидания фото
+                waitingOrshProblemReason.put(chatId, orshId);
+                sendCancelKeyboard(chatId, "⚠️ <b>Невозможно сделать фото!</b>\nНапишите причину (например: затоплен подвал, нет ключа, спилен замок):");
+                return;
+            }
 
             if (data.equals("TOOL_MENU_RETURN") && "ADMIN".equals(role)) {
                 sendUsersForToolReturn(chatId);
@@ -403,6 +463,8 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 fileWaitState.remove(chatId);
                 sendMenu(chatId, role, "🚫 <b>Действие отменено.</b>");
                 waitingToolWriteOffReason.remove(chatId);
+                waitingOrshPhoto.remove(chatId);
+                waitingOrshProblemReason.remove(chatId);
                 return;
             }
 
@@ -429,6 +491,8 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 writeOffSessions.remove(chatId);
                 fileWaitState.remove(chatId);
                 waitingToolWriteOffReason.remove(chatId);
+                waitingOrshPhoto.remove(chatId);
+                waitingOrshProblemReason.remove(chatId);
             }
 
             if (waitingTakeMaterialId.containsKey(chatId)) {
@@ -519,6 +583,13 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 return;
             }
 
+            if (waitingOrshProblemReason.containsKey(chatId)) {
+                int orshId = waitingOrshProblemReason.remove(chatId);
+                DatabaseManager.markOrshCompleted(orshId, firstName, true, text);
+                sendMenu(chatId, role, "⚠️ Причина зафиксирована. Этот ОРШ переведен в статус проблемных.");
+                return;
+            }
+
             switch (text) {
                 case "/start" -> {
                     String roleTitle = role.equals("ADMIN") ? "Администратор (МОЛ)" : "Мастер ЦБР УЛКС №2 ЛКЦ";
@@ -551,27 +622,51 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 }
 
                 case "📦 Склад (Наличие и цены)" -> sendWarehouseList(chatId, role);
-                case "🧰 Мой подотчет" -> sendMenu(chatId, role, DatabaseManager.getUserBalanceText(chatId));
                 case "📝 Списать / Вернуть" -> startWriteOffMenu(chatId, role);
                 case "📋 Тарифы услуг" -> sendMenu(chatId, role, DatabaseManager.getServiceTariffsText());
                 case "🔢 Коды закрытия" -> sendMenu(chatId, role, DatabaseManager.getClosingCodesText());
                 case "🧾 Калькулятор квитанции" -> sendCartMenu(chatId, role);
+                case "🧰 Мой подотчет" -> sendMyInventoryMenu(chatId, "🧰 <b>Ваш подотчет:</b>\nВыберите, что хотите посмотреть:");
+                case "📦 Мои материалы" -> sendMyInventoryMenu(chatId, DatabaseManager.getUserBalanceText(chatId));
+                case "🪛 Мой инструмент" -> sendMyInventoryMenu(chatId, DatabaseManager.getUserToolsText(chatId));
+                case "📸 Плановый осмотр ОРШ" -> sendPendingOrshList(chatId);
+                case "📊 Статистика ОРШ" -> {
+                    if (role.equals("ADMIN")) sendMenu(chatId, role, DatabaseManager.getOrshStatistics());
+                }
+                case "📥 Загрузить план ОРШ (Excel)" -> {
+                    if (role.equals("ADMIN")) {
+                        fileWaitState.put(chatId, "ORSH");
+                        sendCancelKeyboard(chatId, "📁 Отправьте файл ПЛАНА ОРШ (Excel) прямо в этот чат.\n\nКолонки:\n• A — Номер ОРШ\n• B — Адрес\n• C — Местоположение");
+                    }
+                }
 
-                case "📊 У кого что на руках" -> {
-                    if (role.equals("ADMIN")) sendMenu(chatId, role, DatabaseManager.getAllWorkersBalancesText());
+                // --- ГРУППА: ЗАГРУЗКИ ---
+                case "📥 Загрузки (Excel)" -> {
+                    if (role.equals("ADMIN")) sendUploadsMenu(chatId, "📥 <b>Меню загрузки файлов (Excel):</b>\nВыберите базу для обновления:");
                 }
                 case "📥 Загрузить ведомость (Excel)" -> {
                     if (role.equals("ADMIN")) {
                         fileWaitState.put(chatId, "TURNOVER");
-                        sendMenu(chatId, role, "📎 Отправьте файл ОБОРОТНОЙ ВЕДОМОСТИ прямо в этот чат.");
+                        sendCancelKeyboard(chatId, "📎 Отправьте файл ОБОРОТНОЙ ВЕДОМОСТИ прямо в этот чат.");
                     }
                 }
                 case "📥 Загрузить график (Excel)" -> {
                     if (role.equals("ADMIN")) {
                         fileWaitState.put(chatId, "SCHEDULE");
-                        sendMenu(chatId, role, "🗓 Отправьте файл ГРАФИКА РАБОТ прямо в этот чат.");
+                        sendCancelKeyboard(chatId, "🗓 Отправьте файл ГРАФИКА РАБОТ прямо в этот чат.");
                     }
                 }
+                case "📥 Загрузить инструмент (Excel)" -> {
+                    if (role.equals("ADMIN")) {
+                        fileWaitState.put(chatId, "TOOLS");
+                        sendCancelKeyboard(chatId, "🪛 Отправьте файл базы ИНСТРУМЕНТА прямо в этот чат.");
+                    }
+                }
+
+                case "📊 У кого что на руках" -> {
+                    if (role.equals("ADMIN")) sendMenu(chatId, role, DatabaseManager.getAllWorkersBalancesText());
+                }
+
                 case "📑 Скачать отчет за месяц" -> {
                     if (role.equals("ADMIN")) sendExcelReport(chatId, role);
                 }
@@ -609,13 +704,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 case "👥 Пользователи" -> {
                     if (role.equals("ADMIN")) sendMenu(chatId, role, DatabaseManager.getUsersListText());
                 }
-                case "📥 Загрузить инструмент (Excel)" -> {
-                    if (role.equals("ADMIN")) {
-                        fileWaitState.put(chatId, "TOOLS");
-                        sendMenu(chatId, role, "🪛 Отправьте файл базы ИНСТРУМЕНТА прямо в этот чат.\n\nУбедитесь, что:\n• Столбец A — Инвентарный номер\n• Столбец B — Наименование\n• Столбец L — Количество");
-                    }
-                }
-                case "🪛 Мой инструмент" -> sendMenu(chatId, role, DatabaseManager.getUserToolsText(chatId));
+
                 case "🛠 Управление инструментом" -> {
                     if (role.equals("ADMIN")) sendToolAdminMenu(chatId);
                 }
@@ -1055,42 +1144,44 @@ public class WarehouseBot extends TelegramLongPollingBot {
 
         KeyboardRow row1 = new KeyboardRow();
         row1.add("📦 Склад (Наличие и цены)");
-        row1.add("🧰 Мой подотчет");
-        row1.add("🪛 Мой инструмент"); // Новая кнопка для всех
+        row1.add("🧰 Мой подотчет"); // Теперь это папка, убрали отдельную кнопку инструмента
         keyboard.add(row1);
 
-        // Объединенная кнопка
         KeyboardRow row2 = new KeyboardRow();
         row2.add("📝 Списать / Вернуть");
+        row2.add("📸 Плановый осмотр ОРШ");
         keyboard.add(row2);
 
+        // Чтобы 4 кнопки не слипались, разобьем их на 2 ряда
         KeyboardRow row3 = new KeyboardRow();
         row3.add("🧾 Калькулятор квитанции");
         row3.add("📋 Тарифы услуг");
-        row3.add("🔢 Коды закрытия");
-        row3.add("🗓 Мой график");
         keyboard.add(row3);
+
+        KeyboardRow row4 = new KeyboardRow();
+        row4.add("🔢 Коды закрытия");
+        row4.add("🗓 Мой график");
+        keyboard.add(row4);
 
         if ("ADMIN".equals(role)) {
             KeyboardRow adminRow1 = new KeyboardRow();
             adminRow1.add("📊 У кого что на руках");
-            adminRow1.add("📥 Загрузить ведомость (Excel)");
+            adminRow1.add("🛠 Управление инструментом");
             keyboard.add(adminRow1);
 
             KeyboardRow adminRow2 = new KeyboardRow();
+            adminRow2.add("🔍 Аудит остатков");
             adminRow2.add("📑 Скачать отчет за месяц");
-            adminRow2.add("📥 Загрузить график (Excel)");
+            adminRow2.add("📊 Статистика ОРШ");
             keyboard.add(adminRow2);
 
             KeyboardRow adminRow3 = new KeyboardRow();
-            adminRow3.add("🔍 Аудит остатков");
             adminRow3.add("📢 Сделать рассылку");
             adminRow3.add("👥 Пользователи");
             keyboard.add(adminRow3);
 
             KeyboardRow adminRow4 = new KeyboardRow();
-            adminRow4.add("📥 Загрузить инструмент (Excel)");
-            adminRow4.add("🛠 Управление инструментом"); // Новая кнопка админа
+            adminRow4.add("📥 Загрузки (Excel)"); // Объединенная кнопка-папка!
             keyboard.add(adminRow4);
         }
 
@@ -1352,5 +1443,97 @@ public class WarehouseBot extends TelegramLongPollingBot {
         SendMessage msg = new SendMessage(String.valueOf(chatId), "♻️ <b>Какой инструмент восстановить на склад?</b>\nНажмите на нужную позицию:");
         msg.setParseMode("HTML"); msg.setReplyMarkup(markup);
         try { execute(msg); } catch (TelegramApiException e) {}
+    }
+    private void sendMyInventoryMenu(long chatId, String text) {
+        SendMessage message = new SendMessage(String.valueOf(chatId), text);
+        message.setParseMode("HTML");
+        ReplyKeyboardMarkup markup = new ReplyKeyboardMarkup();
+        markup.setResizeKeyboard(true);
+
+        KeyboardRow row1 = new KeyboardRow();
+        row1.add("📦 Мои материалы");
+        row1.add("🪛 Мой инструмент");
+
+        KeyboardRow row2 = new KeyboardRow();
+        row2.add("🔙 Назад");
+
+        markup.setKeyboard(List.of(row1, row2));
+        message.setReplyMarkup(markup);
+        try { execute(message); } catch (TelegramApiException e) { e.printStackTrace(); }
+    }
+
+    private void sendUploadsMenu(long chatId, String text) {
+        SendMessage message = new SendMessage(String.valueOf(chatId), text);
+        message.setParseMode("HTML");
+        ReplyKeyboardMarkup markup = new ReplyKeyboardMarkup();
+        markup.setResizeKeyboard(true);
+
+        KeyboardRow row1 = new KeyboardRow();
+        row1.add("📥 Загрузить ведомость (Excel)");
+
+        KeyboardRow row2 = new KeyboardRow();
+        row2.add("📥 Загрузить инструмент (Excel)");
+
+        KeyboardRow row3 = new KeyboardRow();
+        row3.add("📥 Загрузить график (Excel)");
+
+        KeyboardRow row4 = new KeyboardRow();
+        row4.add("📥 Загрузить план ОРШ (Excel)"); // <-- НОВОЕ
+
+        KeyboardRow row5 = new KeyboardRow();
+        row5.add("🔙 Назад"); // Бывший ряд 4 стал 5-м
+
+        markup.setKeyboard(List.of(row1, row2, row3, row4, row5));
+        message.setReplyMarkup(markup);
+        try { execute(message); } catch (TelegramApiException e) { e.printStackTrace(); }
+    }
+    private void sendPendingOrshList(long chatId) {
+        List<String[]> list = DatabaseManager.getPendingOrshList();
+        if (list.isEmpty()) {
+            sendMenu(chatId, "WORKER", "🎉 <b>План осмотра пуст!</b>\nВсе шкафы проверены или новый план еще не загружен.");
+            return;
+        }
+
+        InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
+        List<List<InlineKeyboardButton>> rows = new ArrayList<>();
+
+        int count = 0;
+        for (String[] o : list) {
+            if (count >= 30) break; // Показываем максимум 30 шкафов за раз
+            String btnText = "ОРШ-" + o[1] + " (" + (o[2].length() > 20 ? o[2].substring(0, 20) + "…" : o[2]) + ")";
+            InlineKeyboardButton btn = new InlineKeyboardButton(btnText);
+            btn.setCallbackData("ORSH_SEL:" + o[0]);
+            rows.add(List.of(btn));
+            count++;
+        }
+        markup.setKeyboard(rows);
+        SendMessage msg = new SendMessage(String.valueOf(chatId), "📸 <b>Осталось проверить: " + list.size() + " шт.</b>\nВыберите шкаф из списка (показаны ближайшие " + count + "):");
+        msg.setParseMode("HTML");
+        msg.setReplyMarkup(markup);
+        try { execute(msg); } catch (TelegramApiException e) { e.printStackTrace(); }
+    }
+
+    private void sendOrshDetails(long chatId, int orshId) {
+        String[] orsh = DatabaseManager.getOrshById(orshId);
+        if (orsh == null) {
+            sendMenu(chatId, "WORKER", "❌ Шкаф не найден или уже был проверен.");
+            return;
+        }
+
+        waitingOrshPhoto.put(chatId, orshId);
+        sendCancelKeyboard(chatId, "Подготовка к осмотру...");
+
+        InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
+        InlineKeyboardButton btnProb = new InlineKeyboardButton("⚠️ Невозможно сделать фото");
+        btnProb.setCallbackData("ORSH_PROB:" + orshId);
+        markup.setKeyboard(List.of(List.of(btnProb)));
+
+        String text = String.format("📸 <b>Выбран ОРШ-%s</b>\n\n📍 Адрес: %s\n🧭 Местоположение: %s\n\n👇 <b>Отправьте фото шкафа прямо в этот чат!</b>",
+                orsh[0], orsh[1], orsh[2]);
+
+        SendMessage msg = new SendMessage(String.valueOf(chatId), text);
+        msg.setParseMode("HTML");
+        msg.setReplyMarkup(markup);
+        try { execute(msg); } catch (TelegramApiException e) { e.printStackTrace(); }
     }
 }

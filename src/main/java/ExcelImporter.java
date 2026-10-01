@@ -310,5 +310,40 @@ public class ExcelImporter {
             return "❌ Ошибка при чтении Excel файла с инструментом: " + e.getMessage();
         }
     }
+    // Чтение плана ОРШ
+    public static String importOrshSheet(File file) {
+        List<DatabaseManager.ParsedOrsh> list = new ArrayList<>();
+        try (FileInputStream fis = new FileInputStream(file);
+             org.apache.poi.ss.usermodel.Workbook workbook = org.apache.poi.ss.usermodel.WorkbookFactory.create(fis)) {
 
+            org.apache.poi.ss.usermodel.Sheet sheet = workbook.getSheetAt(0);
+            for (org.apache.poi.ss.usermodel.Row row : sheet) {
+                if (row.getRowNum() == 0) continue; // Пропуск заголовка
+
+                org.apache.poi.ss.usermodel.Cell numCell = row.getCell(0);
+                if (numCell == null) continue;
+
+                DatabaseManager.ParsedOrsh o = new DatabaseManager.ParsedOrsh();
+
+                // Читаем как текст или как число без нулей
+                if (numCell.getCellType() == org.apache.poi.ss.usermodel.CellType.NUMERIC) {
+                    o.number = String.valueOf((long) numCell.getNumericCellValue());
+                } else {
+                    o.number = numCell.getStringCellValue().trim();
+                }
+
+                org.apache.poi.ss.usermodel.Cell addrCell = row.getCell(1);
+                o.address = (addrCell != null && addrCell.getCellType() == org.apache.poi.ss.usermodel.CellType.STRING) ? addrCell.getStringCellValue().trim() : "";
+
+                org.apache.poi.ss.usermodel.Cell locCell = row.getCell(2);
+                o.location = (locCell != null && locCell.getCellType() == org.apache.poi.ss.usermodel.CellType.STRING) ? locCell.getStringCellValue().trim() : "";
+
+                if (!o.number.isEmpty()) list.add(o);
+            }
+            return DatabaseManager.saveImportedOrsh(list);
+        } catch (Exception e) {
+            e.printStackTrace();
+            return "❌ Ошибка при чтении файла ОРШ: " + e.getMessage();
+        }
+    }
 }

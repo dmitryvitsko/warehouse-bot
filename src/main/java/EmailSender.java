@@ -15,7 +15,8 @@ public class EmailSender {
         }
     }
 
-    public static void sendOrshReport(String subject, String text, File photoFile) {
+    // Пробрасываем Exception наверх, чтобы WarehouseBot знал о сбоях сети или авторизации
+    public static void sendOrshReport(String subject, String text, File photoFile) throws Exception {
         String from = config.getProperty("bot.email.login");
         String password = config.getProperty("bot.email.password");
         String to = config.getProperty("bot.email.target");
@@ -33,31 +34,32 @@ public class EmailSender {
             }
         });
 
-        try {
-            Message message = new MimeMessage(session);
-            message.setFrom(new InternetAddress(from, "Бот Склада ЦБР"));
-            message.setRecipients(Message.RecipientType.TO, InternetAddress.parse(to));
-            message.setSubject(subject);
+        // ИСПРАВЛЕНИЕ ЗДЕСЬ: Используем MimeMessage вместо базового Message
+        MimeMessage message = new MimeMessage(session);
 
-            // Текст письма
-            BodyPart messageBodyPart = new MimeBodyPart();
-            messageBodyPart.setText(text);
-            Multipart multipart = new MimeMultipart();
-            multipart.addBodyPart(messageBodyPart);
+        // Теперь Java отлично видит второй аргумент "UTF-8"
+        message.setFrom(new InternetAddress(from, "Бот Склада ЦБР", "UTF-8"));
+        message.setRecipients(Message.RecipientType.TO, InternetAddress.parse(to));
+        message.setSubject(subject, "UTF-8");
 
-            // Вложение (фото)
-            if (photoFile != null && photoFile.exists()) {
-                MimeBodyPart attachPart = new MimeBodyPart();
-                attachPart.attachFile(photoFile);
-                multipart.addBodyPart(attachPart);
-            }
+        // Текст письма с принудительной кодировкой
+        MimeBodyPart messageBodyPart = new MimeBodyPart();
+        messageBodyPart.setText(text, "UTF-8");
 
-            message.setContent(multipart);
-            Transport.send(message);
-            System.out.println("✅ Письмо успешно отправлено на " + to);
-        } catch (Exception e) {
-            e.printStackTrace();
-            System.out.println("❌ Ошибка отправки письма!");
+        Multipart multipart = new MimeMultipart();
+        multipart.addBodyPart(messageBodyPart);
+
+        // Вложение (фото)
+        if (photoFile != null && photoFile.exists()) {
+            MimeBodyPart attachPart = new MimeBodyPart();
+            attachPart.attachFile(photoFile);
+            multipart.addBodyPart(attachPart);
         }
+
+        message.setContent(multipart);
+
+        // Если здесь произойдет сбой (Яндекс не пустит), код прервется и выбросит ошибку
+        Transport.send(message);
+        System.out.println("✅ Письмо успешно отправлено на " + to);
     }
 }

@@ -98,8 +98,9 @@ public class ExcelReportGenerator {
             String[] colsSum = {"Код", "Наименование", "По квитанциям", "Без квитанций", "ВСЕГО (раб. ед.)", "Раб. ед.", "ВСЕГО для бух. ведомости", "Бух. ед."};
             createHeader(sheetSum, colsSum, headerStyle);
 
+            // ИСПРАВЛЕНО: acc_unit -> original_unit, conversion_factor -> conv_factor
             ResultSet rsSum = stmt.executeQuery("""
-                SELECT m.code, m.name, m.work_unit, m.acc_unit, m.conversion_factor,
+                SELECT m.code, m.name, m.work_unit, m.original_unit, m.conv_factor,
                        SUM(CASE WHEN t.is_paid_receipt = 1 THEN t.quantity ELSE 0 END) as paid_qty,
                        SUM(CASE WHEN t.is_paid_receipt = 0 THEN t.quantity ELSE 0 END) as free_qty,
                        SUM(t.quantity) as total_work_qty
@@ -114,7 +115,7 @@ public class ExcelReportGenerator {
             while (rsSum.next()) {
                 Row row = sheetSum.createRow(rowIdx++);
                 double totalWork = rsSum.getDouble("total_work_qty");
-                double factor = rsSum.getDouble("conversion_factor");
+                double factor = rsSum.getDouble("conv_factor");
                 double totalAcc = totalWork / factor; // Переводим метры обратно в км (или шт в тыс. шт)
 
                 row.createCell(0).setCellValue(rsSum.getString("code"));
@@ -124,7 +125,7 @@ public class ExcelReportGenerator {
                 row.createCell(4).setCellValue(totalWork);
                 row.createCell(5).setCellValue(rsSum.getString("work_unit"));
                 row.createCell(6).setCellValue(totalAcc);
-                row.createCell(7).setCellValue(rsSum.getString("acc_unit"));
+                row.createCell(7).setCellValue(rsSum.getString("original_unit"));
             }
             autoSizeColumns(sheetSum, colsSum.length);
 
@@ -137,11 +138,12 @@ public class ExcelReportGenerator {
 
             rowIdx = 1;
             // Сначала выводим остатки на главном складе МОЛ
-            ResultSet rsWh = stmt.executeQuery("SELECT code, name, warehouse_qty, work_unit, price_with_vat, conversion_factor, acc_unit FROM materials WHERE warehouse_qty > 0");
+            // ИСПРАВЛЕНО: acc_unit -> original_unit, conversion_factor -> conv_factor
+            ResultSet rsWh = stmt.executeQuery("SELECT code, name, warehouse_qty, work_unit, price_with_vat, conv_factor, original_unit FROM materials WHERE warehouse_qty > 0");
             while (rsWh.next()) {
                 Row row = sheetBal.createRow(rowIdx++);
                 double qty = rsWh.getDouble("warehouse_qty");
-                double factor = rsWh.getDouble("conversion_factor");
+                double factor = rsWh.getDouble("conv_factor");
                 row.createCell(0).setCellValue("📦 СКЛАД МОЛ");
                 row.createCell(1).setCellValue(rsWh.getString("code"));
                 row.createCell(2).setCellValue(rsWh.getString("name"));
@@ -149,12 +151,13 @@ public class ExcelReportGenerator {
                 row.createCell(4).setCellValue(rsWh.getString("work_unit"));
                 row.createCell(5).setCellValue(rsWh.getDouble("price_with_vat"));
                 row.createCell(6).setCellValue(qty / factor);
-                row.createCell(7).setCellValue(rsWh.getString("acc_unit"));
+                row.createCell(7).setCellValue(rsWh.getString("original_unit"));
             }
 
             // Затем выводим остатки на руках у каждого мастера пофамильно
+            // ИСПРАВЛЕНО: acc_unit -> original_unit, conversion_factor -> conv_factor
             ResultSet rsEmp = stmt.executeQuery("""
-                SELECT u.full_name, m.code, m.name, b.quantity, m.work_unit, m.price_with_vat, m.conversion_factor, m.acc_unit
+                SELECT u.full_name, m.code, m.name, b.quantity, m.work_unit, m.price_with_vat, m.conv_factor, m.original_unit
                 FROM employee_balances b
                 JOIN users u ON b.user_id = u.id
                 JOIN materials m ON b.material_id = m.id
@@ -164,7 +167,7 @@ public class ExcelReportGenerator {
             while (rsEmp.next()) {
                 Row row = sheetBal.createRow(rowIdx++);
                 double qty = rsEmp.getDouble("quantity");
-                double factor = rsEmp.getDouble("conversion_factor");
+                double factor = rsEmp.getDouble("conv_factor");
                 row.createCell(0).setCellValue("👤 " + rsEmp.getString("full_name"));
                 row.createCell(1).setCellValue(rsEmp.getString("code"));
                 row.createCell(2).setCellValue(rsEmp.getString("name"));
@@ -172,7 +175,7 @@ public class ExcelReportGenerator {
                 row.createCell(4).setCellValue(rsEmp.getString("work_unit"));
                 row.createCell(5).setCellValue(rsEmp.getDouble("price_with_vat"));
                 row.createCell(6).setCellValue(qty / factor);
-                row.createCell(7).setCellValue(rsEmp.getString("acc_unit"));
+                row.createCell(7).setCellValue(rsEmp.getString("original_unit"));
             }
             autoSizeColumns(sheetBal, colsBal.length);
 

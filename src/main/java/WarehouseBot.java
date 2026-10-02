@@ -1,4 +1,5 @@
 import org.telegram.telegrambots.bots.TelegramLongPollingBot;
+import org.telegram.telegrambots.meta.api.methods.AnswerCallbackQuery;
 import org.telegram.telegrambots.meta.api.methods.GetFile;
 import org.telegram.telegrambots.meta.api.methods.send.SendDocument;
 import org.telegram.telegrambots.meta.api.methods.send.SendMessage;
@@ -48,6 +49,63 @@ public class WarehouseBot extends TelegramLongPollingBot {
         return config.getProperty("bot.username");
     }
 
+    private boolean isAdminBlockedByPendingRequests(long chatId, String role) {
+        if (!"ADMIN".equals(role)) return false;
+        List<String[]> pendingUsers = DatabaseManager.getPendingUsers();
+        List<String[]> pendingReturns = DatabaseManager.getPendingReturnRequests();
+
+        if (!pendingUsers.isEmpty() || !pendingReturns.isEmpty()) {
+            sendPendingAdminRequestsLocked(chatId, pendingUsers, pendingReturns);
+            return true;
+        }
+        return false;
+    }
+
+    private void sendPendingAdminRequestsLocked(long chatId, List<String[]> pendingUsers, List<String[]> pendingReturns) {
+        SendMessage blockMsg = new SendMessage(String.valueOf(chatId), "🚨 <b>ДЕЙСТВИЕ ПРИОСТАНОВЛЕНО!</b> 🚨\n\nУ вас висят необработанные заявки от сотрудников. Чтобы запросы не затерялись в истории чата, бот заблокировал основное меню.\n\n👇 <b>Пожалуйста, примите решение по заявкам ниже:</b>");
+        blockMsg.setParseMode("HTML");
+        try { execute(blockMsg); } catch (TelegramApiException e) { e.printStackTrace(); }
+
+        for (String[] pu : pendingUsers) {
+            long newUserId = Long.parseLong(pu[0]);
+            String newUserName = pu[1];
+
+            InlineKeyboardButton btnApprove = new InlineKeyboardButton("✅ Одобрить (Мастер)");
+            btnApprove.setCallbackData("NEW_USER_APP:" + newUserId);
+            InlineKeyboardButton btnReject = new InlineKeyboardButton("❌ Заблокировать");
+            btnReject.setCallbackData("NEW_USER_REJ:" + newUserId);
+            InlineKeyboardMarkup markup = new InlineKeyboardMarkup(List.of(List.of(btnApprove, btnReject)));
+
+            String text = String.format("👤 <b>Новый пользователь ждет доступа!</b>\n\nИмя: <b>%s</b>\nID: <code>%d</code>\n\nРазрешить доступ?", newUserName, newUserId);
+            SendMessage msg = new SendMessage(String.valueOf(chatId), text);
+            msg.setParseMode("HTML");
+            msg.setReplyMarkup(markup);
+            try { execute(msg); } catch (TelegramApiException e) { e.printStackTrace(); }
+        }
+
+        for (String[] pr : pendingReturns) {
+            int reqId = Integer.parseInt(pr[0]);
+            String workerName = pr[1];
+            String matName = pr[2];
+            String code = pr[3];
+            String qty = DatabaseManager.fmtQty(Double.parseDouble(pr[4]));
+            String unit = pr[5];
+
+            String alertMsg = String.format("🔔 <b>Запрос на возврат на склад (№%d)</b>\n\n👤 Сотрудник: <b>%s</b>\n📦 Материал: <b>%s</b>\n🔢 Инв. №: <code>%s</code>\n↩️ Количество к возврату: <b>%s %s</b>", reqId, workerName, matName, code, qty, unit);
+
+            InlineKeyboardButton btnApprove = new InlineKeyboardButton("✅ Принять на склад");
+            btnApprove.setCallbackData("RET_APP:" + reqId);
+            InlineKeyboardButton btnReject = new InlineKeyboardButton("❌ Отклонить");
+            btnReject.setCallbackData("RET_REJ:" + reqId);
+            InlineKeyboardMarkup markup = new InlineKeyboardMarkup(List.of(List.of(btnApprove, btnReject)));
+
+            SendMessage msg = new SendMessage(String.valueOf(chatId), alertMsg);
+            msg.setParseMode("HTML");
+            msg.setReplyMarkup(markup);
+            try { execute(msg); } catch (TelegramApiException e) { e.printStackTrace(); }
+        }
+    }
+
     @Override
     public void onUpdateReceived(Update update) {
         if (update.hasMessage() && update.getMessage().hasDocument()) {
@@ -55,11 +113,11 @@ public class WarehouseBot extends TelegramLongPollingBot {
             String firstName = update.getMessage().getFrom().getFirstName();
             String role = checkRoleAndNotify(chatId, firstName);
             if ("BANNED".equals(role) || "PENDING".equals(role)) return;
-
             if (!"ADMIN".equals(role)) {
                 sendMenu(chatId, role, "❌ Загружать файлы может только Администратор (МОЛ).");
                 return;
             }
+            if (isAdminBlockedByPendingRequests(chatId, role)) return;
 
             String state = fileWaitState.getOrDefault(chatId, "");
             if (state.isEmpty()) {
@@ -79,19 +137,12 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 GetFile getFile = new GetFile(doc.getFileId());
                 org.telegram.telegrambots.meta.api.objects.File tgFile = execute(getFile);
                 File localFile = downloadFile(tgFile);
-
                 String result;
-                if ("TURNOVER".equals(state)) {
-                    result = ExcelImporter.importTurnoverSheet(localFile);
-                } else if ("SCHEDULE".equals(state)) {
-                    result = ExcelImporter.importScheduleSheet(localFile);
-                } else if ("TOOLS".equals(state)) {
-                    result = ExcelImporter.importToolsSheet(localFile);
-                } else if ("ORSH".equals(state)) {
-                    result = ExcelImporter.importOrshSheet(localFile);
-                } else {
-                    result = "❌ Неизвестное состояние загрузки файла.";
-                }
+                if ("TURNOVER".equals(state)) result = ExcelImporter.importTurnoverSheet(localFile);
+                else if ("SCHEDULE".equals(state)) result = ExcelImporter.importScheduleSheet(localFile);
+                else if ("TOOLS".equals(state)) result = ExcelImporter.importToolsSheet(localFile);
+                else if ("ORSH".equals(state)) result = ExcelImporter.importOrshSheet(localFile);
+                else result = "❌ Неизвестное состояние загрузки файла.";
 
                 localFile.delete();
                 fileWaitState.remove(chatId);
@@ -108,32 +159,29 @@ public class WarehouseBot extends TelegramLongPollingBot {
             String firstName = update.getMessage().getFrom().getFirstName();
             String role = checkRoleAndNotify(chatId, firstName);
 
+            if (isAdminBlockedByPendingRequests(chatId, role)) return;
+
             if (waitingOrshPhoto.containsKey(chatId)) {
                 int orshId = waitingOrshPhoto.remove(chatId);
                 sendMenu(chatId, role, "⏳ Скачиваю фото и отправляю на почту руководству...");
 
                 try {
-                    // Берем фото максимального качества (оно всегда последнее в списке)
                     var photos = update.getMessage().getPhoto();
                     String fileId = photos.get(photos.size() - 1).getFileId();
                     GetFile getFile = new GetFile(fileId);
                     org.telegram.telegrambots.meta.api.objects.File tgFile = execute(getFile);
                     File localFile = downloadFile(tgFile);
 
-                    // Достаем данные шкафа из базы
                     String[] orsh = DatabaseManager.getOrshById(orshId);
                     String subject = "Осмотр ОРШ-" + orsh[0] + " (" + firstName + ")";
                     String textBody = String.format("Плановый осмотр ОРШ\n\nНомер: %s\nАдрес: %s\nМестоположение: %s\n\nВыполнил: %s",
                             orsh[0], orsh[1], orsh[2], firstName);
 
-                    // Переименовываем файл для удобства
-                    File renamedFile = new File(localFile.getParent(), "ORSH_" + orsh[0] + "_" + firstName + ".jpg");
+                    String safeAddress = orsh[1].replaceAll("[\\\\/:*?\"<>|]", " ");
+                    File renamedFile = new File(localFile.getParent(), "ОРШ " + orsh[0] + " - " + safeAddress + ".jpg");
                     localFile.renameTo(renamedFile);
 
-                    // Отправляем письмо!
                     EmailSender.sendOrshReport(subject, textBody, renamedFile);
-
-                    // Удаляем файл с компьютера и закрываем шкаф в базе
                     renamedFile.delete();
                     DatabaseManager.markOrshCompleted(orshId, firstName, false, "ОК");
 
@@ -152,6 +200,25 @@ public class WarehouseBot extends TelegramLongPollingBot {
             String firstName = update.getCallbackQuery().getFrom().getFirstName();
             String role = checkRoleAndNotify(chatId, firstName);
 
+            if (data.startsWith("F_ASS:") && "ADMIN".equals(role)) {
+                String[] parts = data.split(":");
+                int firstId = Integer.parseInt(parts[1]);
+                long targetUserId = Long.parseLong(parts[2]);
+
+                String[] res = DatabaseManager.assignAnyAvailableToolFast(firstId, targetUserId);
+
+                AnswerCallbackQuery answer = new AnswerCallbackQuery();
+                answer.setCallbackQueryId(update.getCallbackQuery().getId());
+                answer.setText(res[1]);
+                answer.setShowAlert(false);
+                try { execute(answer); } catch (TelegramApiException e) { e.printStackTrace(); }
+
+                if ("OK".equals(res[0])) {
+                    sendDirectNotification(targetUserId, res[2]);
+                }
+                return;
+            }
+
             if (data.startsWith("ORSH_SEL:")) {
                 int orshId = Integer.parseInt(data.split(":")[1]);
                 sendOrshDetails(chatId, orshId);
@@ -159,7 +226,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
             }
             if (data.startsWith("ORSH_PROB:")) {
                 int orshId = Integer.parseInt(data.split(":")[1]);
-                waitingOrshPhoto.remove(chatId); // Отменяем режим ожидания фото
+                waitingOrshPhoto.remove(chatId);
                 waitingOrshProblemReason.put(chatId, orshId);
                 sendCancelKeyboard(chatId, "⚠️ <b>Невозможно сделать фото!</b>\nНапишите причину (например: затоплен подвал, нет ключа, спилен замок):");
                 return;
@@ -190,7 +257,6 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 InlineKeyboardButton btnUser = new InlineKeyboardButton("👤 У сотрудника");
                 btnUser.setCallbackData("T_WO_LOC:ASSIGNED");
                 InlineKeyboardMarkup markup = new InlineKeyboardMarkup(List.of(List.of(btnStock, btnUser)));
-
                 SendMessage msg = new SendMessage(String.valueOf(chatId), "🗑 <b>Где сейчас находится инструмент, который нужно списать?</b>");
                 msg.setParseMode("HTML"); msg.setReplyMarkup(markup);
                 try { execute(msg); } catch (TelegramApiException e) { e.printStackTrace(); }
@@ -202,37 +268,31 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 else sendUsersForToolWriteOff(chatId);
                 return;
             }
-
             if (data.startsWith("T_WO_U:") && "ADMIN".equals(role)) {
                 sendUserToolsForWriteOff(chatId, Long.parseLong(data.split(":")[1]));
                 return;
             }
-
             if (data.startsWith("T_WO_G:") && "ADMIN".equals(role)) {
                 sendSpecificToolsInStockForWriteOff(chatId, Integer.parseInt(data.split(":")[1]));
                 return;
             }
-
             if (data.startsWith("T_WO_DO:") && "ADMIN".equals(role)) {
                 int toolId = Integer.parseInt(data.split(":")[1]);
                 waitingToolWriteOffReason.put(chatId, toolId);
                 sendCancelKeyboard(chatId, "✍️ Выбран инструмент: <b>" + DatabaseManager.getToolNameAndInvById(toolId) + "</b>\n\nВведите <b>причину списания</b> (например: утерян, сломался, акт №12):");
                 return;
             }
-
             if (data.startsWith("T_RET_U:") && "ADMIN".equals(role)) {
                 long targetUserId = Long.parseLong(data.split(":")[1]);
                 sendUserToolsForReturn(chatId, targetUserId);
                 return;
             }
-
             if (data.startsWith("T_RET_T:") && "ADMIN".equals(role)) {
                 int toolId = Integer.parseInt(data.split(":")[1]);
                 String result = DatabaseManager.returnToolToWarehouse(toolId);
                 sendMenu(chatId, role, result);
                 return;
             }
-
             if (data.equals("TOOL_MENU_AUDIT") && "ADMIN".equals(role)) {
                 sendMenu(chatId, role, DatabaseManager.getToolsAuditText());
                 return;
@@ -241,45 +301,40 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 sendAvailableToolsForAssignment(chatId);
                 return;
             }
-
             if (data.startsWith("T_SEL_N:") && "ADMIN".equals(role)) {
                 int toolId = Integer.parseInt(data.split(":")[1]);
                 sendUsersForToolAssignment(chatId, toolId);
                 return;
             }
-
             if (data.startsWith("T_ASS_U:") && "ADMIN".equals(role)) {
                 String[] parts = data.split(":");
                 int toolId = Integer.parseInt(parts[1]);
                 long targetUserId = Long.parseLong(parts[2]);
-
                 String result = DatabaseManager.assignTool(toolId, targetUserId);
                 sendMenu(chatId, role, result);
 
-                // Оповещаем сотрудника в ЛС о том, что ему выдали инструмент
                 if (result.startsWith("✅") && targetUserId != chatId) {
                     sendDirectNotification(targetUserId, "🔔 <b>Вам выдан новый инструмент!</b>\nМОЛ закрепил за вами новую позицию. Нажмите «🪛 Мой инструмент», чтобы проверить ваш список.");
                 }
                 return;
             }
-            // Обработка кнопок одобрения/отклонения от МОЛ
+
             if (data.startsWith("NEW_USER_APP:") && "ADMIN".equals(role)) {
                 long targetId = Long.parseLong(data.split(":")[1]);
-                DatabaseManager.setBanStatus(targetId, false); // Одобряем (переводим в WORKER)
+                DatabaseManager.setBanStatus(targetId, false);
                 sendMenu(chatId, role, "✅ Пользователь " + targetId + " одобрен и получил доступ.");
                 sendDirectNotification(targetId, "✅ <b>Администратор одобрил ваш доступ!</b>\nТеперь вы можете пользоваться ботом. Нажмите /start для обновления меню.");
                 return;
             }
             if (data.startsWith("NEW_USER_REJ:") && "ADMIN".equals(role)) {
                 long targetId = Long.parseLong(data.split(":")[1]);
-                DatabaseManager.setBanStatus(targetId, true); // Блокируем
+                DatabaseManager.setBanStatus(targetId, true);
                 sendMenu(chatId, role, "❌ Пользователь " + targetId + " заблокирован.");
                 return;
             }
 
             if ("BANNED".equals(role) || "PENDING".equals(role)) return;
 
-            // --- КАЛЬКУЛЯТОР КВИТАНЦИЙ ---
             if (data.equals("CART_MENU")) {
                 sendCartMenu(chatId, role);
                 return;
@@ -295,16 +350,13 @@ public class WarehouseBot extends TelegramLongPollingBot {
             if (data.startsWith("CART_SEL_SRV:")) {
                 int srvId = Integer.parseInt(data.split(":")[1]);
                 DatabaseManager.ReceiptSession s = receiptSessions.computeIfAbsent(chatId, k -> new DatabaseManager.ReceiptSession());
-
                 DatabaseManager.ReceiptItem item = DatabaseManager.getServiceById(srvId);
                 if (item != null) {
                     if (item.isSingle) {
-                        // Это разовая услуга, сразу ставим количество 1 и добавляем в корзину
                         item.quantity = 1.0;
                         s.items.add(item);
                         sendCartMenu(chatId, role);
                     } else {
-                        // Услуга требует ввода количества (метры, штуки)
                         s.waitingServiceId = srvId;
                         s.waitingMaterialId = -1;
                         sendCancelKeyboard(chatId, "✍️ <b>Введите количество</b> для выбранной услуги (например: 1 или 2):");
@@ -326,7 +378,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
                     sendMenu(chatId, role, "❌ Ваша квитанция пуста. Сначала добавьте услуги или материалы.");
                 } else {
                     String receiptText = DatabaseManager.generateReceiptText(s);
-                    receiptSessions.remove(chatId); // Очищаем корзину после расчета
+                    receiptSessions.remove(chatId);
                     sendMenu(chatId, role, receiptText);
                 }
                 return;
@@ -348,7 +400,47 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 writeOffSessions.remove(chatId);
                 int materialId = Integer.parseInt(data.split(":")[1]);
                 waitingTakeMaterialId.put(chatId, materialId);
-                sendCancelKeyboard(chatId, "✍️ Введите количество, которое вы берете со склада (например: <code>5</code> или <code>0.02</code>):");
+                sendCancelKeyboard(chatId, "Подготовка к выдаче...");
+
+                SendMessage msg = new SendMessage(String.valueOf(chatId), "✍️️ <b>Укажите количество:</b>\nНапишите число вручную (например: <code>15</code> или <code>0.5</code>)\n👇 ИЛИ нажмите на быструю кнопку ниже:");
+                msg.setParseMode("HTML");
+
+                InlineKeyboardMarkup inlineMarkup = new InlineKeyboardMarkup();
+                List<List<InlineKeyboardButton>> rows = new ArrayList<>();
+                rows.add(List.of(
+                        createBtn("1", "TAKE_Q:1"), createBtn("2", "TAKE_Q:2"),
+                        createBtn("3", "TAKE_Q:3"), createBtn("4", "TAKE_Q:4"),
+                        createBtn("5", "TAKE_Q:5")
+                ));
+                rows.add(List.of(
+                        createBtn("10", "TAKE_Q:10"), createBtn("20", "TAKE_Q:20"),
+                        createBtn("50", "TAKE_Q:50"), createBtn("100", "TAKE_Q:100")
+                ));
+                inlineMarkup.setKeyboard(rows);
+                msg.setReplyMarkup(inlineMarkup);
+                try { execute(msg); } catch (TelegramApiException e) { e.printStackTrace(); }
+                return;
+            }
+
+            if (data.startsWith("TAKE_Q:")) {
+                if (waitingTakeMaterialId.containsKey(chatId)) {
+                    try {
+                        double qty = Double.parseDouble(data.split(":")[1]);
+                        int materialId = waitingTakeMaterialId.get(chatId);
+                        String result = DatabaseManager.takeMaterialFromWarehouse(chatId, materialId, qty);
+
+                        if (result.startsWith("✅")) {
+                            waitingTakeMaterialId.remove(chatId);
+                            sendMenu(chatId, role, result);
+                        } else {
+                            SendMessage msg = new SendMessage(String.valueOf(chatId), result);
+                            msg.setParseMode("HTML");
+                            try { execute(msg); } catch (TelegramApiException e) { e.printStackTrace(); }
+                        }
+                    } catch (Exception e) { e.printStackTrace(); }
+                } else {
+                    sendMenu(chatId, role, "❌ Ошибка: вы не выбрали материал или сессия устарела.");
+                }
                 return;
             }
 
@@ -383,9 +475,40 @@ public class WarehouseBot extends TelegramLongPollingBot {
                     return;
                 }
                 writeOffSessions.put(chatId, session);
-                sendCancelKeyboard(chatId, String.format(
-                        "Выбрано: <b>%s</b>\nДоступно у вас: <b>%s %s</b>\n\n✍️ Введите количество:",
+                sendCancelKeyboard(chatId, "Подготовка к списанию...");
+
+                SendMessage msg = new SendMessage(String.valueOf(chatId), String.format(
+                        "Выбрано: <b>%s</b>\nДоступно у вас: <b>%s %s</b>\n\n✍️ Напишите количество вручную ИЛИ выберите быстрый вариант:",
                         session.materialName, DatabaseManager.fmtQty(session.maxAvailable), session.unit));
+                msg.setParseMode("HTML");
+
+                InlineKeyboardMarkup inlineMarkup = new InlineKeyboardMarkup();
+                List<List<InlineKeyboardButton>> rows = new ArrayList<>();
+                rows.add(List.of(
+                        createBtn("1", "WO_Q:1"), createBtn("2", "WO_Q:2"),
+                        createBtn("5", "WO_Q:5"), createBtn("10", "WO_Q:10")
+                ));
+                rows.add(List.of(
+                        createBtn("Всё (" + DatabaseManager.fmtQty(session.maxAvailable) + " " + session.unit + ")", "WO_Q:" + session.maxAvailable)
+                ));
+                inlineMarkup.setKeyboard(rows);
+                msg.setReplyMarkup(inlineMarkup);
+                try { execute(msg); } catch (TelegramApiException e) { e.printStackTrace(); }
+                return;
+            }
+
+            if (data.startsWith("WO_Q:") && writeOffSessions.containsKey(chatId)) {
+                WriteOffSession s = writeOffSessions.get(chatId);
+                try {
+                    double qty = Double.parseDouble(data.split(":")[1]);
+                    if (qty <= 0 || qty > s.maxAvailable + 1e-9) {
+                        sendCancelKeyboard(chatId, String.format("❌ Ошибка: доступно не более %s %s.", DatabaseManager.fmtQty(s.maxAvailable), s.unit));
+                        return;
+                    }
+                    s.quantity = qty;
+                    s.step = "WAIT_TYPE";
+                    sendTypeButtons(chatId, s);
+                } catch (Exception e) { e.printStackTrace(); }
                 return;
             }
 
@@ -420,11 +543,8 @@ public class WarehouseBot extends TelegramLongPollingBot {
             }
 
             if (data.startsWith("WO_CODE:") && writeOffSessions.containsKey(chatId)) {
-                // Извлекаем сессию и сразу удаляем её из ожиданий, так как это финальный шаг
                 WriteOffSession session = writeOffSessions.remove(chatId);
                 session.closingCode = data.split(":")[1];
-
-                // Автоматически прописываем причину для базы данных на основе выбранного кода
                 session.reason = switch (session.closingCode) {
                     case "212" -> "Ремонт ВОК на участке ОРК-ОРА";
                     case "227" -> "Выправление волокна";
@@ -434,10 +554,12 @@ public class WarehouseBot extends TelegramLongPollingBot {
                     case "217" -> "Участок ОРШ-ОРК: запасной модуль";
                     default -> "Тех. списание (Код " + session.closingCode + ")";
                 };
-
-                // Сразу завершаем списание
                 String res = DatabaseManager.completeWriteOff(chatId, session);
                 sendMenu(chatId, role, res);
+
+                if (!"ADMIN".equals(role)) {
+                    notifyAdminsForAction(chatId, "🔔 <b>ВНИМАНИЕ! Списание материала:</b>\nМастер <b>" + firstName + "</b> только что выполнил техническое списание:\n\n" + res);
+                }
                 return;
             }
             return;
@@ -457,50 +579,86 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 return;
             }
 
-            if (text.equals("❌ Отменить")) {
+            if (text.equals("❌ Отменить") || text.equals("🔙 Назад")) {
                 waitingTakeMaterialId.remove(chatId);
                 writeOffSessions.remove(chatId);
                 fileWaitState.remove(chatId);
-                sendMenu(chatId, role, "🚫 <b>Действие отменено.</b>");
                 waitingToolWriteOffReason.remove(chatId);
                 waitingOrshPhoto.remove(chatId);
                 waitingOrshProblemReason.remove(chatId);
+
+                if (text.equals("❌ Отменить")) sendMenu(chatId, role, "🚫 <b>Действие отменено.</b>");
+                else sendMenu(chatId, role, "Вы вернулись в главное меню:");
                 return;
             }
 
-            if (text.equals("🔙 Назад")) {
-                if (waitingTakeMaterialId.containsKey(chatId)) {
-                    waitingTakeMaterialId.remove(chatId);
-                    sendWarehouseList(chatId, role);
+            if (!text.equals("/start") && !text.equals("/fix") && !text.startsWith("/take_") && !text.startsWith("/give_")) {
+                if (isAdminBlockedByPendingRequests(chatId, role)) {
                     return;
                 }
-                if (writeOffSessions.containsKey(chatId)) {
-                    handleWriteOffBack(chatId, role);
-                    return;
-                }
-                sendMenu(chatId, role, "Вы вернулись в главное меню:");
-                return;
             }
 
             if (text.startsWith("📦") || text.startsWith("🧰") || text.startsWith("📝") ||
-                    text.startsWith("📋") || text.startsWith("🔢") ||
+                    text.startsWith("📋") || text.startsWith("🔢") || text.startsWith("🤝") ||
                     text.startsWith("📊") || text.startsWith("📥") || text.startsWith("📑") ||
                     text.startsWith("🗓") || text.startsWith("🔍") || text.startsWith("📢") ||
-                    text.startsWith("👥") || text.startsWith("🪛") || text.startsWith("🛠") || text.equals("/start")) {
+                    text.startsWith("👥") || text.startsWith("🪛") || text.startsWith("🛠") ||
+                    text.startsWith("📞") || text.equals("/start")) {
                 waitingTakeMaterialId.remove(chatId);
                 writeOffSessions.remove(chatId);
                 fileWaitState.remove(chatId);
                 waitingToolWriteOffReason.remove(chatId);
                 waitingOrshPhoto.remove(chatId);
                 waitingOrshProblemReason.remove(chatId);
+            }
+
+            if (text.startsWith("/take_") && "ADMIN".equals(role)) {
+                try {
+                    int toolId = Integer.parseInt(text.replace("/take_", ""));
+                    String result = DatabaseManager.returnToolToWarehouse(toolId);
+                    sendMenu(chatId, role, result);
+                } catch (Exception e) {}
+                return;
+            }
+
+            if (text.startsWith("/give_") && "ADMIN".equals(role)) {
+                try {
+                    int firstId = Integer.parseInt(text.replace("/give_", ""));
+                    String toolName = DatabaseManager.getToolNameById(firstId);
+
+                    List<String[]> users = DatabaseManager.getUsersForToolAssignment();
+                    InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
+                    List<List<InlineKeyboardButton>> rows = new ArrayList<>();
+
+                    for (String[] u : users) {
+                        String roleIcon = "ADMIN".equals(u[2]) ? "👑" : "👷‍♂️";
+                        InlineKeyboardButton btn = new InlineKeyboardButton(roleIcon + " " + u[1]);
+                        btn.setCallbackData("F_ASS:" + firstId + ":" + u[0]);
+                        rows.add(List.of(btn));
+                    }
+                    markup.setKeyboard(rows);
+
+                    SendMessage msg = new SendMessage(String.valueOf(chatId), String.format("🪛 Быстрая выдача: <b>%s</b>\n\n👤 <b>Нажимайте на фамилии сотрудников</b>, чтобы выдать им этот инструмент со склада (можно нажать несколько раз подряд на разных людей):", toolName));
+                    msg.setParseMode("HTML");
+                    msg.setReplyMarkup(markup);
+                    execute(msg);
+                } catch (Exception e) {}
+                return;
             }
 
             if (waitingTakeMaterialId.containsKey(chatId)) {
                 try {
                     double qty = Double.parseDouble(text.trim().replace(",", "."));
-                    int materialId = waitingTakeMaterialId.remove(chatId);
+                    int materialId = waitingTakeMaterialId.get(chatId);
                     String result = DatabaseManager.takeMaterialFromWarehouse(chatId, materialId, qty);
-                    sendMenu(chatId, role, result);
+                    if (result.startsWith("✅")) {
+                        waitingTakeMaterialId.remove(chatId);
+                        sendMenu(chatId, role, result);
+                    } else {
+                        SendMessage msg = new SendMessage(String.valueOf(chatId), result);
+                        msg.setParseMode("HTML");
+                        try { execute(msg); } catch (TelegramApiException e) { e.printStackTrace(); }
+                    }
                 } catch (NumberFormatException e) {
                     sendCancelKeyboard(chatId, "❌ Введите корректное число (например: <code>5</code> или <code>0.05</code>).");
                 }
@@ -512,13 +670,11 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 sendMenu(chatId, role, result);
                 return;
             }
-
             if (writeOffSessions.containsKey(chatId)) {
-                handleWriteOffStep(chatId, role, text);
+                handleWriteOffStep(chatId, firstName, role, text);
                 return;
             }
 
-            // Обработка ввода количества для калькулятора квитанций
             DatabaseManager.ReceiptSession cartSession = receiptSessions.get(chatId);
             if (cartSession != null && (cartSession.waitingServiceId != -1 || cartSession.waitingMaterialId != -1)) {
                 try {
@@ -547,7 +703,6 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 return;
             }
 
-            // Обработка текста для массовой рассылки
             if ("WAIT_BROADCAST_TEXT".equals(fileWaitState.get(chatId))) {
                 fileWaitState.remove(chatId);
                 sendMenu(chatId, role, "⏳ Отправляю сообщение всем сотрудникам...");
@@ -557,15 +712,13 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 String broadcastMsg = "📢 <b>ИНФОРМАЦИЯ ОТ РУКОВОДИТЕЛЯ:</b>\n\n" + text;
 
                 for (Long userId : allUsers) {
-                    if (userId == chatId) continue; // Себе не отправляем
+                    if (userId == chatId) continue;
                     try {
                         SendMessage msg = new SendMessage(String.valueOf(userId), broadcastMsg);
                         msg.setParseMode("HTML");
                         execute(msg);
                         successCount++;
-                    } catch (TelegramApiException e) {
-                        // Пользователь мог заблокировать бота
-                    }
+                    } catch (TelegramApiException e) {}
                 }
                 sendMenu(chatId, role, "✅ Рассылка успешно доставлена <b>" + successCount + "</b> сотрудникам!");
                 return;
@@ -606,21 +759,29 @@ public class WarehouseBot extends TelegramLongPollingBot {
                         } catch (Exception e) { e.printStackTrace(); }
                     }
                 }
-
+                case "📞 Справочник" -> sendMenu(chatId, role, getDirectoryText());
+                case "🗓 График работ" -> sendScheduleMenu(chatId);
                 case "🗓 Мой график" -> {
                     String excelName = DatabaseManager.getUserExcelName(chatId);
                     if (excelName != null) {
                         sendMenu(chatId, role, DatabaseManager.getFormattedSchedule(excelName));
                     } else {
                         List<String> names = DatabaseManager.getAvailableExcelNames();
-                        if (names.isEmpty()) {
-                            sendMenu(chatId, role, "ℹ️ График работ еще не загружен администратором.");
-                        } else {
-                            sendNameBindingMenu(chatId, names);
-                        }
+                        if (names.isEmpty()) sendMenu(chatId, role, "ℹ График работ еще не загружен администратором.");
+                        else sendNameBindingMenu(chatId, names);
                     }
                 }
-
+                case "🤝 С кем я в смене?" -> {
+                    String excelName = DatabaseManager.getUserExcelName(chatId);
+                    if (excelName != null) {
+                        String result = DatabaseManager.getShiftPartners(excelName);
+                        sendMenu(chatId, role, result);
+                    } else {
+                        List<String> names = DatabaseManager.getAvailableExcelNames();
+                        if (names.isEmpty()) sendMenu(chatId, role, "ℹ Ваш профиль еще не привязан к графику. Сначала привяжите его через кнопку «🗓 Мой график».");
+                        else sendNameBindingMenu(chatId, names);
+                    }
+                }
                 case "📦 Склад (Наличие и цены)" -> sendWarehouseList(chatId, role);
                 case "📝 Списать / Вернуть" -> startWriteOffMenu(chatId, role);
                 case "📋 Тарифы услуг" -> sendMenu(chatId, role, DatabaseManager.getServiceTariffsText());
@@ -639,8 +800,6 @@ public class WarehouseBot extends TelegramLongPollingBot {
                         sendCancelKeyboard(chatId, "📁 Отправьте файл ПЛАНА ОРШ (Excel) прямо в этот чат.\n\nКолонки:\n• A — Номер ОРШ\n• B — Адрес\n• C — Местоположение");
                     }
                 }
-
-                // --- ГРУППА: ЗАГРУЗКИ ---
                 case "📥 Загрузки (Excel)" -> {
                     if (role.equals("ADMIN")) sendUploadsMenu(chatId, "📥 <b>Меню загрузки файлов (Excel):</b>\nВыберите базу для обновления:");
                 }
@@ -662,11 +821,9 @@ public class WarehouseBot extends TelegramLongPollingBot {
                         sendCancelKeyboard(chatId, "🪛 Отправьте файл базы ИНСТРУМЕНТА прямо в этот чат.");
                     }
                 }
-
                 case "📊 У кого что на руках" -> {
                     if (role.equals("ADMIN")) sendMenu(chatId, role, DatabaseManager.getAllWorkersBalancesText());
                 }
-
                 case "📑 Скачать отчет за месяц" -> {
                     if (role.equals("ADMIN")) sendExcelReport(chatId, role);
                 }
@@ -675,22 +832,18 @@ public class WarehouseBot extends TelegramLongPollingBot {
                         sendMenu(chatId, role, "⏳ Начинаю рассылку уведомлений...");
                         List<Long> workersWithMaterials = DatabaseManager.getUsersWithBalances();
                         int successCount = 0;
-
                         for (Long workerId : workersWithMaterials) {
                             String balanceText = DatabaseManager.getUserBalanceText(workerId);
                             String alertMsg = "⚠️ <b>ВНИМАНИЕ: АУДИТ ОСТАТКОВ!</b> ⚠️\n\n"
                                     + "Напоминаем о необходимости закрыть подотчет до конца месяца. "
                                     + "Пожалуйста, <b>спишите</b> использованные материалы в квитанции/заявки "
-                                    + "или <b>верните</b> остатки на склад!\n\n"
-                                    + balanceText;
+                                    + "или <b>верните</b> остатки на склад!\n\n" + balanceText;
                             try {
                                 SendMessage msg = new SendMessage(String.valueOf(workerId), alertMsg);
                                 msg.setParseMode("HTML");
                                 execute(msg);
                                 successCount++;
-                            } catch (TelegramApiException e) {
-                                // Пользователь мог заблокировать бота, просто пропускаем
-                            }
+                            } catch (TelegramApiException e) {}
                         }
                         sendMenu(chatId, role, "✅ Уведомления об аудите успешно доставлены <b>" + successCount + "</b> сотрудникам!");
                     }
@@ -704,7 +857,6 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 case "👥 Пользователи" -> {
                     if (role.equals("ADMIN")) sendMenu(chatId, role, DatabaseManager.getUsersListText());
                 }
-
                 case "🛠 Управление инструментом" -> {
                     if (role.equals("ADMIN")) sendToolAdminMenu(chatId);
                 }
@@ -713,6 +865,74 @@ public class WarehouseBot extends TelegramLongPollingBot {
                     else sendMenu(chatId, role, "Используйте кнопки меню внизу экрана 👇");
                 }
             }
+        }
+    }
+
+    private InlineKeyboardButton createBtn(String text, String callbackData) {
+        InlineKeyboardButton btn = new InlineKeyboardButton(text);
+        btn.setCallbackData(callbackData);
+        return btn;
+    }
+
+    private String getDirectoryText() {
+        return """
+            📞 <b>ТЕЛЕФОННЫЙ СПРАВОЧНИК</b>
+            
+            🏢 <b>Руководство ЛКЦ</b>
+            ▪️ Нач. цеха Богино А.Е.: +375(17) 335-24-44
+            ▪️ Зам. нач. цеха Жук С.Г.: +375(17) 334-44-45
+            
+            👷‍♂ <b>ИТР УЛКС №2</b>
+            ▪️ Нач. УЛКС №2 Лазуко С.В.: +375(17) 200-02-98, +375(29) 501-01-11
+            ▪️ Зам. нач. УЛКС №2 Журко А.Н.: +375(17) 264-93-74, +375(29) 231-69-23
+            ▪ Рук. каб. группы Прохорчик В.Ю.: +375(17) 200-40-40, +375(29) 176-58-88
+            ▪️ Рук. гр. технадзора Снитко А.В.: +375(33) 347-28-85
+            ▪️ Рук. гр. малопарщиков Никитин Д.Д.: +375(44) 752-02-69
+            ▪ Рук. изм. группы Лабуза С.И.: +375(29) 701-88-29
+            
+            💻 <b>Технический отдел</b>
+            ▪ Рук. гр. технадзора Шашков В.П.: +375(29) 373-35-55
+            ▪️ Инж. технадзора Кононова Светлана: +375(29) 577-57-46
+            ▪ Магистральщики (Протасевич Юлия): +375(29) 560-80-82
+            ▪️ Профсоюзные дела (Луговцова Оксана): +375(29) 317-19-56
+            
+            🗂 <b>Администрация</b>
+            ▪️ Профком (Нестерова Е.Ю.): +375(17) 359-45-70
+            ▪️ Бухгалтерия по ЗП (Ромашко Ю.Г.): +375(17) 359-45-20
+            ▪️ Специалист по кадрам (Субач Е.В.): +375(17) 359-45-03
+            
+            🚗 <b>АТЦ</b>
+            ▪️ Начальник Савицкий А.В.: +375(17) 369-05-25, +375(33) 603-32-73
+            ▪️ Зам. начальника Болбас Р.А.: +375(17) 369-03-93, +375(29) 840-78-37
+            ▪️ Инж. по БД Гузов А.П.: +375(17) 369-05-27, +375(29) 779-11-88
+            
+            🔌 <b>Станционщики (магистраль / проключения)</b>
+            ▪️ Инженер Ивашкевич Дарья: +375(29) 555-38-48
+            
+            📺 <b>Привязка СМЛ приставок</b>
+            ▪️ Дневное время (Ольга): +375(29) 788-84-98
+            ▪️ Вечернее время: +375(17) 334-56-24, +375(17) 328-46-56, +375(17) 252-44-55, +375(17) 359-41-10
+            
+            🎧 <b>Диспетчера и админы (закрытие заявок)</b>
+            ▪ Диспетчеры ЦАБР: +375(17) 288-47-10
+            ▪️ Инженер ЦАБР: +375(17) 268-46-26
+            ▪️️ Админы: +375(17) 306-29-56, +375(33) 603-38-81
+            ▪ После 20:00: +375(17) 306-29-59
+            ▪️ VPN: +375(17) 203-66-86
+            
+            📹 <b>Прочее</b>
+            ▪ Видеоконтроль (Андрей): +375(17) 359-40-30
+            ▪️ РСМОБ: +375(17) 357-96-30
+            """;
+    }
+
+    private void notifyAdminsForAction(long excludeChatId, String text) {
+        List<Long> adminIds = DatabaseManager.getAdminIds();
+        for (Long adminId : adminIds) {
+            if (adminId == excludeChatId) continue;
+            SendMessage msg = new SendMessage(String.valueOf(adminId), text);
+            msg.setParseMode("HTML");
+            try { execute(msg); } catch (TelegramApiException e) { e.printStackTrace(); }
         }
     }
 
@@ -790,7 +1010,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
         }
     }
 
-    private void handleWriteOffStep(long chatId, String role, String text) {
+    private void handleWriteOffStep(long chatId, String firstName, String role, String text) {
         WriteOffSession s = writeOffSessions.get(chatId);
         switch (s.step) {
             case "WAIT_QTY" -> {
@@ -828,6 +1048,10 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 writeOffSessions.remove(chatId);
                 String res = DatabaseManager.completeWriteOff(chatId, s);
                 sendMenu(chatId, role, res);
+
+                if (!"ADMIN".equals(role)) {
+                    notifyAdminsForAction(chatId, "🧾 <b>ВНИМАНИЕ! Выбита квитанция:</b>\nМастер <b>" + firstName + "</b> только что отчитался по квитанции:\n\n" + res);
+                }
             }
             case "WAIT_FREE_PHONE" -> {
                 s.phoneNumber = text.trim();
@@ -876,11 +1100,13 @@ public class WarehouseBot extends TelegramLongPollingBot {
         btnReject.setCallbackData("RET_REJ:" + requestId);
         InlineKeyboardMarkup markup = new InlineKeyboardMarkup(List.of(List.of(btnApprove, btnReject)));
 
+        String alertMsg = "🚨 <b>ТРЕБУЕТСЯ ВАШЕ РАЗРЕШЕНИЕ!</b> 🚨\n\n" + text + "\n\n<i>❗️ Мастер ждет подтверждения, чтобы вернуть этот материал на склад.</i>";
+
         List<Long> adminIds = DatabaseManager.getAdminIds();
         for (Long adminId : adminIds) {
             SendMessage msg = new SendMessage();
             msg.setChatId(String.valueOf(adminId));
-            msg.setText(text);
+            msg.setText(alertMsg);
             msg.setParseMode("HTML");
             msg.setReplyMarkup(markup);
             try { execute(msg); } catch (TelegramApiException e) { e.printStackTrace(); }
@@ -1102,7 +1328,6 @@ public class WarehouseBot extends TelegramLongPollingBot {
 
     private void handleUpdateService(long chatId, String role, String text) {
         try {
-            // Ожидаемый формат: +услуга Вызов мастера ; 10.50
             String[] parts = text.substring(8).split(";");
             if (parts.length == 2) {
                 String name = parts[0].trim();
@@ -1135,16 +1360,13 @@ public class WarehouseBot extends TelegramLongPollingBot {
     }
 
     public void sendMenu(long chatId, String role, String text) {
-        SendMessage message = new SendMessage(String.valueOf(chatId), text);
-        message.setParseMode("HTML");
-
         ReplyKeyboardMarkup keyboardMarkup = new ReplyKeyboardMarkup();
         keyboardMarkup.setResizeKeyboard(true);
         List<KeyboardRow> keyboard = new ArrayList<>();
 
         KeyboardRow row1 = new KeyboardRow();
         row1.add("📦 Склад (Наличие и цены)");
-        row1.add("🧰 Мой подотчет"); // Теперь это папка, убрали отдельную кнопку инструмента
+        row1.add("🧰 Мой подотчет");
         keyboard.add(row1);
 
         KeyboardRow row2 = new KeyboardRow();
@@ -1152,7 +1374,6 @@ public class WarehouseBot extends TelegramLongPollingBot {
         row2.add("📸 Плановый осмотр ОРШ");
         keyboard.add(row2);
 
-        // Чтобы 4 кнопки не слипались, разобьем их на 2 ряда
         KeyboardRow row3 = new KeyboardRow();
         row3.add("🧾 Калькулятор квитанции");
         row3.add("📋 Тарифы услуг");
@@ -1160,8 +1381,12 @@ public class WarehouseBot extends TelegramLongPollingBot {
 
         KeyboardRow row4 = new KeyboardRow();
         row4.add("🔢 Коды закрытия");
-        row4.add("🗓 Мой график");
+        row4.add("🗓 График работ");
         keyboard.add(row4);
+
+        KeyboardRow row5 = new KeyboardRow();
+        row5.add("📞 Справочник");
+        keyboard.add(row5);
 
         if ("ADMIN".equals(role)) {
             KeyboardRow adminRow1 = new KeyboardRow();
@@ -1181,15 +1406,99 @@ public class WarehouseBot extends TelegramLongPollingBot {
             keyboard.add(adminRow3);
 
             KeyboardRow adminRow4 = new KeyboardRow();
-            adminRow4.add("📥 Загрузки (Excel)"); // Объединенная кнопка-папка!
+            adminRow4.add("📥 Загрузки (Excel)");
             keyboard.add(adminRow4);
         }
 
         keyboardMarkup.setKeyboard(keyboard);
-        message.setReplyMarkup(keyboardMarkup);
 
-        try { execute(message); } catch (TelegramApiException e) { e.printStackTrace(); }
+        int maxLength = 3900;
+        try {
+            if (text.length() <= maxLength) {
+                SendMessage message = new SendMessage(String.valueOf(chatId), text);
+                message.setParseMode("HTML");
+                message.setReplyMarkup(keyboardMarkup);
+                execute(message);
+            } else {
+                while (text.length() > maxLength) {
+                    int splitIndex = text.lastIndexOf("\n\n", maxLength);
+                    if (splitIndex == -1) {
+                        splitIndex = text.lastIndexOf('\n', maxLength);
+                    }
+                    if (splitIndex == -1) {
+                        splitIndex = maxLength;
+                    }
+
+                    String part = text.substring(0, splitIndex);
+                    text = text.substring(splitIndex).trim();
+
+                    SendMessage msgPart = new SendMessage(String.valueOf(chatId), part);
+                    msgPart.setParseMode("HTML");
+                    execute(msgPart);
+                }
+
+                if (!text.isEmpty()) {
+                    SendMessage message = new SendMessage(String.valueOf(chatId), text);
+                    message.setParseMode("HTML");
+                    message.setReplyMarkup(keyboardMarkup);
+                    execute(message);
+                }
+            }
+        } catch (TelegramApiException e) {
+            e.printStackTrace();
+        }
     }
+
+    private void sendPendingOrshList(long chatId) {
+        List<String[]> list = DatabaseManager.getPendingOrshList();
+        if (list.isEmpty()) {
+            sendMenu(chatId, "WORKER", "🎉 <b>План осмотра пуст!</b>\nВсе шкафы проверены или новый план еще не загружен.");
+            return;
+        }
+
+        InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
+        List<List<InlineKeyboardButton>> rows = new ArrayList<>();
+
+        int count = 0;
+        for (String[] o : list) {
+            if (count >= 30) break;
+            String btnText = "📍 " + (o[2].length() > 35 ? o[2].substring(0, 35) + "…" : o[2]);
+            InlineKeyboardButton btn = new InlineKeyboardButton(btnText);
+            btn.setCallbackData("ORSH_SEL:" + o[0]);
+            rows.add(List.of(btn));
+            count++;
+        }
+        markup.setKeyboard(rows);
+        SendMessage msg = new SendMessage(String.valueOf(chatId), "📸 <b>Осталось проверить: " + list.size() + " шт.</b>\nВыберите адрес из списка (показаны ближайшие " + count + "):");
+        msg.setParseMode("HTML");
+        msg.setReplyMarkup(markup);
+        try { execute(msg); } catch (TelegramApiException e) { e.printStackTrace(); }
+    }
+
+    private void sendOrshDetails(long chatId, int orshId) {
+        String[] orsh = DatabaseManager.getOrshById(orshId);
+        if (orsh == null) {
+            sendMenu(chatId, "WORKER", "❌ Шкаф не найден или уже был проверен.");
+            return;
+        }
+
+        waitingOrshPhoto.put(chatId, orshId);
+        sendCancelKeyboard(chatId, "Подготовка к осмотру...");
+
+        InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
+        InlineKeyboardButton btnProb = new InlineKeyboardButton("⚠ Невозможно сделать фото");
+        btnProb.setCallbackData("ORSH_PROB:" + orshId);
+        markup.setKeyboard(List.of(List.of(btnProb)));
+
+        String text = String.format("📸 <b>Выбран ОРШ-%s</b>\n\n📍 Адрес: %s\n🧭 Местоположение: %s\n\n👇 <b>Отправьте фото шкафа прямо в этот чат!</b>",
+                orsh[0], orsh[1], orsh[2]);
+
+        SendMessage msg = new SendMessage(String.valueOf(chatId), text);
+        msg.setParseMode("HTML");
+        msg.setReplyMarkup(markup);
+        try { execute(msg); } catch (TelegramApiException e) { e.printStackTrace(); }
+    }
+
     private String checkRoleAndNotify(long chatId, String firstName) {
         String role = DatabaseManager.getUserRole(chatId, firstName);
         if ("NEW_PENDING".equals(role)) {
@@ -1222,109 +1531,67 @@ public class WarehouseBot extends TelegramLongPollingBot {
     private void sendToolAdminMenu(long chatId) {
         InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
         List<List<InlineKeyboardButton>> rows = new ArrayList<>();
-
-        InlineKeyboardButton btnAssign = new InlineKeyboardButton("🤝 Выдать мастеру");
-        btnAssign.setCallbackData("TOOL_MENU_ASSIGN");
-
-        InlineKeyboardButton btnReturn = new InlineKeyboardButton("↩️ Забрать на склад");
-        btnReturn.setCallbackData("TOOL_MENU_RETURN");
-
-        InlineKeyboardButton btnWriteOff = new InlineKeyboardButton("🗑 Списать (поломка)");
-        btnWriteOff.setCallbackData("TOOL_MENU_WRITEOFF");
-
-        InlineKeyboardButton btnAudit = new InlineKeyboardButton("📊 Сводка (Аудит)");
-        btnAudit.setCallbackData("TOOL_MENU_AUDIT");
-
-        // Создаем кнопку архива
-        InlineKeyboardButton btnArchive = new InlineKeyboardButton("🗄 Архив списанного");
-        btnArchive.setCallbackData("TOOL_MENU_ARCHIVE");
-
-        // Создаем кнопку восстановления
-        InlineKeyboardButton btnRestore = new InlineKeyboardButton("♻️ Восстановить из архива");
-        btnRestore.setCallbackData("TOOL_MENU_RESTORE");
-
-        rows.add(List.of(btnAssign));
-        rows.add(List.of(btnReturn));
-        rows.add(List.of(btnWriteOff));
-        rows.add(List.of(btnAudit));
-        rows.add(List.of(btnArchive));
-        rows.add(List.of(btnRestore));
-
+        rows.add(List.of(createBtn("🤝 Выдать мастеру", "TOOL_MENU_ASSIGN")));
+        rows.add(List.of(createBtn("↩️ Забрать на склад", "TOOL_MENU_RETURN")));
+        rows.add(List.of(createBtn("🗑 Списать (поломка)", "TOOL_MENU_WRITEOFF")));
+        rows.add(List.of(createBtn("📊 Сводка (Аудит)", "TOOL_MENU_AUDIT")));
+        rows.add(List.of(createBtn("🗄 Архив списанного", "TOOL_MENU_ARCHIVE")));
+        rows.add(List.of(createBtn("♻️ Восстановить из архива", "TOOL_MENU_RESTORE")));
         markup.setKeyboard(rows);
         SendMessage msg = new SendMessage(String.valueOf(chatId), "🛠 <b>УПРАВЛЕНИЕ ИНСТРУМЕНТОМ</b>\nВыберите действие:");
-        msg.setParseMode("HTML");
-        msg.setReplyMarkup(markup);
-        try { execute(msg); } catch (TelegramApiException e) { e.printStackTrace(); }
+        msg.setParseMode("HTML"); msg.setReplyMarkup(markup);
+        try { execute(msg); } catch (TelegramApiException e) {}
     }
+
     private void sendAvailableToolsForAssignment(long chatId) {
         List<String[]> groups = DatabaseManager.getAvailableToolGroups();
         if (groups.isEmpty()) {
             sendMenu(chatId, "ADMIN", "📦 На складе сейчас нет свободного инструмента для выдачи.");
             return;
         }
-
         InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
         List<List<InlineKeyboardButton>> rows = new ArrayList<>();
-
         for (String[] g : groups) {
             String shortName = g[1].length() > 30 ? g[1].substring(0, 30) + "…" : g[1];
-            InlineKeyboardButton btn = new InlineKeyboardButton(String.format("%s (в наличии: %s шт)", shortName, g[2]));
-            btn.setCallbackData("T_SEL_N:" + g[0]);
-            rows.add(List.of(btn));
+            rows.add(List.of(createBtn(shortName + " (в наличии: " + g[2] + " шт)", "T_SEL_N:" + g[0])));
         }
-
         markup.setKeyboard(rows);
         SendMessage msg = new SendMessage(String.valueOf(chatId), "🤝 <b>Шаг 1 из 2: Выберите инструмент для выдачи:</b>");
-        msg.setParseMode("HTML");
-        msg.setReplyMarkup(markup);
-        try { execute(msg); } catch (TelegramApiException e) { e.printStackTrace(); }
+        msg.setParseMode("HTML"); msg.setReplyMarkup(markup);
+        try { execute(msg); } catch (TelegramApiException e) {}
     }
 
     private void sendUsersForToolAssignment(long chatId, int toolId) {
-        // Достаем полное название и номер из базы
         String fullToolNameInfo = DatabaseManager.getToolNameAndInvById(toolId);
-
         List<String[]> users = DatabaseManager.getUsersForToolAssignment();
         InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
         List<List<InlineKeyboardButton>> rows = new ArrayList<>();
-
         for (String[] u : users) {
             String roleIcon = "ADMIN".equals(u[2]) ? "👑" : "👷‍♂️";
-            InlineKeyboardButton btn = new InlineKeyboardButton(roleIcon + " " + u[1]);
-            btn.setCallbackData("T_ASS_U:" + toolId + ":" + u[0]);
-            rows.add(List.of(btn));
+            rows.add(List.of(createBtn(roleIcon + " " + u[1], "T_ASS_U:" + toolId + ":" + u[0])));
         }
-
         markup.setKeyboard(rows);
-
         String text = String.format("🪛 Вы выбрали: <b>%s</b>\n\n👤 <b>Шаг 2 из 2: Кому выдать этот инструмент?</b>\n\n<i>(Если инструмент выбран неверно, просто проигнорируйте это меню и нажмите кнопку «🤝 Выдать мастеру» заново)</i>", fullToolNameInfo);
-
         SendMessage msg = new SendMessage(String.valueOf(chatId), text);
-        msg.setParseMode("HTML");
-        msg.setReplyMarkup(markup);
-        try { execute(msg); } catch (TelegramApiException e) { e.printStackTrace(); }
+        msg.setParseMode("HTML"); msg.setReplyMarkup(markup);
+        try { execute(msg); } catch (TelegramApiException e) {}
     }
+
     private void sendUsersForToolReturn(long chatId) {
         List<String[]> users = DatabaseManager.getUsersWithAssignedTools();
         if (users.isEmpty()) {
             sendMenu(chatId, "ADMIN", "ℹ️ Сейчас ни у кого из сотрудников нет инструмента на руках.");
             return;
         }
-
         InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
         List<List<InlineKeyboardButton>> rows = new ArrayList<>();
-
         for (String[] u : users) {
-            InlineKeyboardButton btn = new InlineKeyboardButton("👤 " + u[1]);
-            btn.setCallbackData("T_RET_U:" + u[0]);
-            rows.add(List.of(btn));
+            rows.add(List.of(createBtn("👤 " + u[1], "T_RET_U:" + u[0])));
         }
-
         markup.setKeyboard(rows);
         SendMessage msg = new SendMessage(String.valueOf(chatId), "↩️ <b>Шаг 1 из 2: У кого забираем инструмент?</b>\nВыберите сотрудника:");
-        msg.setParseMode("HTML");
-        msg.setReplyMarkup(markup);
-        try { execute(msg); } catch (TelegramApiException e) { e.printStackTrace(); }
+        msg.setParseMode("HTML"); msg.setReplyMarkup(markup);
+        try { execute(msg); } catch (TelegramApiException e) {}
     }
 
     private void sendUserToolsForReturn(long chatId, long targetUserId) {
@@ -1333,24 +1600,18 @@ public class WarehouseBot extends TelegramLongPollingBot {
             sendMenu(chatId, "ADMIN", "У этого сотрудника больше нет инструмента.");
             return;
         }
-
         InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
         List<List<InlineKeyboardButton>> rows = new ArrayList<>();
-
         for (String[] t : tools) {
-            // Формируем текст кнопки: Название (Инв: 123)
             String btnText = String.format("%s (Инв: %s)", t[1].length() > 20 ? t[1].substring(0, 20) + "…" : t[1], t[2]);
-            InlineKeyboardButton btn = new InlineKeyboardButton("🪛 " + btnText);
-            btn.setCallbackData("T_RET_T:" + t[0]);
-            rows.add(List.of(btn));
+            rows.add(List.of(createBtn("🪛 " + btnText, "T_RET_T:" + t[0])));
         }
-
         markup.setKeyboard(rows);
         SendMessage msg = new SendMessage(String.valueOf(chatId), "↩️ <b>Шаг 2 из 2: Какой инструмент возвращаем на склад?</b>\nНажмите на нужную позицию:");
-        msg.setParseMode("HTML");
-        msg.setReplyMarkup(markup);
-        try { execute(msg); } catch (TelegramApiException e) { e.printStackTrace(); }
+        msg.setParseMode("HTML"); msg.setReplyMarkup(markup);
+        try { execute(msg); } catch (TelegramApiException e) {}
     }
+
     private void sendUsersForToolWriteOff(long chatId) {
         List<String[]> users = DatabaseManager.getUsersWithAssignedTools();
         if (users.isEmpty()) {
@@ -1360,9 +1621,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
         InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
         List<List<InlineKeyboardButton>> rows = new ArrayList<>();
         for (String[] u : users) {
-            InlineKeyboardButton btn = new InlineKeyboardButton("👤 " + u[1]);
-            btn.setCallbackData("T_WO_U:" + u[0]);
-            rows.add(List.of(btn));
+            rows.add(List.of(createBtn("👤 " + u[1], "T_WO_U:" + u[0])));
         }
         markup.setKeyboard(rows);
         SendMessage msg = new SendMessage(String.valueOf(chatId), "🗑 <b>У кого списываем инструмент?</b>\nВыберите сотрудника:");
@@ -1380,9 +1639,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
         List<List<InlineKeyboardButton>> rows = new ArrayList<>();
         for (String[] t : tools) {
             String btnText = String.format("%s (Инв: %s)", t[1].length() > 20 ? t[1].substring(0, 20) + "…" : t[1], t[2]);
-            InlineKeyboardButton btn = new InlineKeyboardButton("🪛 " + btnText);
-            btn.setCallbackData("T_WO_DO:" + t[0]);
-            rows.add(List.of(btn));
+            rows.add(List.of(createBtn("🪛 " + btnText, "T_WO_DO:" + t[0])));
         }
         markup.setKeyboard(rows);
         SendMessage msg = new SendMessage(String.valueOf(chatId), "🗑 <b>Какой инструмент списываем?</b>\nНажмите на нужную позицию:");
@@ -1400,9 +1657,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
         List<List<InlineKeyboardButton>> rows = new ArrayList<>();
         for (String[] g : groups) {
             String shortName = g[1].length() > 30 ? g[1].substring(0, 30) + "…" : g[1];
-            InlineKeyboardButton btn = new InlineKeyboardButton(shortName + " (" + g[2] + " шт)");
-            btn.setCallbackData("T_WO_G:" + g[0]);
-            rows.add(List.of(btn));
+            rows.add(List.of(createBtn(shortName + " (" + g[2] + " шт)", "T_WO_G:" + g[0])));
         }
         markup.setKeyboard(rows);
         SendMessage msg = new SendMessage(String.valueOf(chatId), "🗑 <b>Выберите категорию инструмента на складе для списания:</b>");
@@ -1416,15 +1671,14 @@ public class WarehouseBot extends TelegramLongPollingBot {
         List<List<InlineKeyboardButton>> rows = new ArrayList<>();
         for (String[] t : tools) {
             String btnText = String.format("%s (Инв: %s)", t[1].length() > 20 ? t[1].substring(0, 20) + "…" : t[1], t[2]);
-            InlineKeyboardButton btn = new InlineKeyboardButton("🪛 " + btnText);
-            btn.setCallbackData("T_WO_DO:" + t[0]);
-            rows.add(List.of(btn));
+            rows.add(List.of(createBtn("🪛 " + btnText, "T_WO_DO:" + t[0])));
         }
         markup.setKeyboard(rows);
         SendMessage msg = new SendMessage(String.valueOf(chatId), "🗑 <b>Выберите конкретную единицу для списания:</b>");
         msg.setParseMode("HTML"); msg.setReplyMarkup(markup);
         try { execute(msg); } catch (TelegramApiException e) {}
     }
+
     private void sendToolsForRestore(long chatId) {
         List<String[]> tools = DatabaseManager.getWrittenOffToolsForRestore();
         if (tools.isEmpty()) {
@@ -1435,31 +1689,42 @@ public class WarehouseBot extends TelegramLongPollingBot {
         List<List<InlineKeyboardButton>> rows = new ArrayList<>();
         for (String[] t : tools) {
             String btnText = String.format("%s (Инв: %s)", t[1].length() > 20 ? t[1].substring(0, 20) + "…" : t[1], t[2]);
-            InlineKeyboardButton btn = new InlineKeyboardButton("♻️️ " + btnText);
-            btn.setCallbackData("T_RES_DO:" + t[0]);
-            rows.add(List.of(btn));
+            rows.add(List.of(createBtn("♻ " + btnText, "T_RES_DO:" + t[0])));
         }
         markup.setKeyboard(rows);
         SendMessage msg = new SendMessage(String.valueOf(chatId), "♻️ <b>Какой инструмент восстановить на склад?</b>\nНажмите на нужную позицию:");
         msg.setParseMode("HTML"); msg.setReplyMarkup(markup);
         try { execute(msg); } catch (TelegramApiException e) {}
     }
+
     private void sendMyInventoryMenu(long chatId, String text) {
         SendMessage message = new SendMessage(String.valueOf(chatId), text);
         message.setParseMode("HTML");
         ReplyKeyboardMarkup markup = new ReplyKeyboardMarkup();
         markup.setResizeKeyboard(true);
-
         KeyboardRow row1 = new KeyboardRow();
         row1.add("📦 Мои материалы");
         row1.add("🪛 Мой инструмент");
-
         KeyboardRow row2 = new KeyboardRow();
         row2.add("🔙 Назад");
-
         markup.setKeyboard(List.of(row1, row2));
         message.setReplyMarkup(markup);
-        try { execute(message); } catch (TelegramApiException e) { e.printStackTrace(); }
+        try { execute(message); } catch (TelegramApiException e) {}
+    }
+
+    private void sendScheduleMenu(long chatId) {
+        SendMessage message = new SendMessage(String.valueOf(chatId), "🗓 <b>Графики и смены:</b>\nВыберите, что хотите посмотреть:");
+        message.setParseMode("HTML");
+        ReplyKeyboardMarkup markup = new ReplyKeyboardMarkup();
+        markup.setResizeKeyboard(true);
+        KeyboardRow row1 = new KeyboardRow();
+        row1.add("🗓 Мой график");
+        row1.add("🤝 С кем я в смене?");
+        KeyboardRow row2 = new KeyboardRow();
+        row2.add("🔙 Назад");
+        markup.setKeyboard(List.of(row1, row2));
+        message.setReplyMarkup(markup);
+        try { execute(message); } catch (TelegramApiException e) {}
     }
 
     private void sendUploadsMenu(long chatId, String text) {
@@ -1467,73 +1732,13 @@ public class WarehouseBot extends TelegramLongPollingBot {
         message.setParseMode("HTML");
         ReplyKeyboardMarkup markup = new ReplyKeyboardMarkup();
         markup.setResizeKeyboard(true);
-
-        KeyboardRow row1 = new KeyboardRow();
-        row1.add("📥 Загрузить ведомость (Excel)");
-
-        KeyboardRow row2 = new KeyboardRow();
-        row2.add("📥 Загрузить инструмент (Excel)");
-
-        KeyboardRow row3 = new KeyboardRow();
-        row3.add("📥 Загрузить график (Excel)");
-
-        KeyboardRow row4 = new KeyboardRow();
-        row4.add("📥 Загрузить план ОРШ (Excel)"); // <-- НОВОЕ
-
-        KeyboardRow row5 = new KeyboardRow();
-        row5.add("🔙 Назад"); // Бывший ряд 4 стал 5-м
-
+        KeyboardRow row1 = new KeyboardRow(); row1.add("📥 Загрузить ведомость (Excel)");
+        KeyboardRow row2 = new KeyboardRow(); row2.add("📥 Загрузить инструмент (Excel)");
+        KeyboardRow row3 = new KeyboardRow(); row3.add("📥 Загрузить график (Excel)");
+        KeyboardRow row4 = new KeyboardRow(); row4.add("📥 Загрузить план ОРШ (Excel)");
+        KeyboardRow row5 = new KeyboardRow(); row5.add("🔙 Назад");
         markup.setKeyboard(List.of(row1, row2, row3, row4, row5));
         message.setReplyMarkup(markup);
-        try { execute(message); } catch (TelegramApiException e) { e.printStackTrace(); }
-    }
-    private void sendPendingOrshList(long chatId) {
-        List<String[]> list = DatabaseManager.getPendingOrshList();
-        if (list.isEmpty()) {
-            sendMenu(chatId, "WORKER", "🎉 <b>План осмотра пуст!</b>\nВсе шкафы проверены или новый план еще не загружен.");
-            return;
-        }
-
-        InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
-        List<List<InlineKeyboardButton>> rows = new ArrayList<>();
-
-        int count = 0;
-        for (String[] o : list) {
-            if (count >= 30) break; // Показываем максимум 30 шкафов за раз
-            String btnText = "ОРШ-" + o[1] + " (" + (o[2].length() > 20 ? o[2].substring(0, 20) + "…" : o[2]) + ")";
-            InlineKeyboardButton btn = new InlineKeyboardButton(btnText);
-            btn.setCallbackData("ORSH_SEL:" + o[0]);
-            rows.add(List.of(btn));
-            count++;
-        }
-        markup.setKeyboard(rows);
-        SendMessage msg = new SendMessage(String.valueOf(chatId), "📸 <b>Осталось проверить: " + list.size() + " шт.</b>\nВыберите шкаф из списка (показаны ближайшие " + count + "):");
-        msg.setParseMode("HTML");
-        msg.setReplyMarkup(markup);
-        try { execute(msg); } catch (TelegramApiException e) { e.printStackTrace(); }
-    }
-
-    private void sendOrshDetails(long chatId, int orshId) {
-        String[] orsh = DatabaseManager.getOrshById(orshId);
-        if (orsh == null) {
-            sendMenu(chatId, "WORKER", "❌ Шкаф не найден или уже был проверен.");
-            return;
-        }
-
-        waitingOrshPhoto.put(chatId, orshId);
-        sendCancelKeyboard(chatId, "Подготовка к осмотру...");
-
-        InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
-        InlineKeyboardButton btnProb = new InlineKeyboardButton("⚠️ Невозможно сделать фото");
-        btnProb.setCallbackData("ORSH_PROB:" + orshId);
-        markup.setKeyboard(List.of(List.of(btnProb)));
-
-        String text = String.format("📸 <b>Выбран ОРШ-%s</b>\n\n📍 Адрес: %s\n🧭 Местоположение: %s\n\n👇 <b>Отправьте фото шкафа прямо в этот чат!</b>",
-                orsh[0], orsh[1], orsh[2]);
-
-        SendMessage msg = new SendMessage(String.valueOf(chatId), text);
-        msg.setParseMode("HTML");
-        msg.setReplyMarkup(markup);
-        try { execute(msg); } catch (TelegramApiException e) { e.printStackTrace(); }
+        try { execute(message); } catch (TelegramApiException e) {}
     }
 }

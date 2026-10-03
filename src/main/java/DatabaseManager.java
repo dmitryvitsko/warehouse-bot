@@ -214,6 +214,43 @@ public class DatabaseManager {
                 );
             """);
 
+            // ==========================================
+            // НОВЫЕ ТАБЛИЦЫ ДЛЯ СВАРОЧНЫХ АППАРАТОВ
+            // ==========================================
+            stmt.execute("""
+                CREATE TABLE IF NOT EXISTS welders (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT UNIQUE,
+                    status TEXT DEFAULT 'ON_BASE',
+                    assigned_to INTEGER DEFAULT NULL,
+                    assigned_time TIMESTAMP DEFAULT NULL
+                );
+            """);
+
+            stmt.execute("""
+                CREATE TABLE IF NOT EXISTS welders_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    welder_id INTEGER,
+                    user_id INTEGER,
+                    action TEXT,
+                    action_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    admin_id INTEGER DEFAULT NULL
+                );
+            """);
+
+            // Первичная загрузка списка сварочников
+            String[] initialWelders = {
+                    "Swift Литвинко", "Switf Салома", "Fujikura Ильев",
+                    "Fujikura новая №1", "Fujikura новая №2", "Sumitomo", "INNO"
+            };
+            try (PreparedStatement psWeld = conn.prepareStatement("INSERT OR IGNORE INTO welders (name) VALUES (?)")) {
+                for (String wName : initialWelders) {
+                    psWeld.setString(1, wName);
+                    psWeld.executeUpdate();
+                }
+            }
+            // ==========================================
+
             try {
                 stmt.execute("UPDATE users SET full_name = (SELECT excel_name FROM user_excel_names WHERE user_excel_names.user_id = users.id) WHERE EXISTS (SELECT 1 FROM user_excel_names WHERE user_excel_names.user_id = users.id)");
             } catch (SQLException ignored) {}
@@ -224,6 +261,136 @@ public class DatabaseManager {
             e.printStackTrace();
         }
     }
+
+    // =========================================================================
+    // СУПЕР-МОДУЛЬ: КОНТРОЛЬ СВАРОЧНЫХ АППАРАТОВ
+    // =========================================================================
+
+    public static boolean takeWelder(int welderId, long userId, Long adminId) {
+        String sqlUpdate = "UPDATE welders SET status = 'IN_USE', assigned_to = ?, assigned_time = datetime('now', 'localtime') WHERE id = ? AND status = 'ON_BASE'";
+        String sqlHistory = "INSERT INTO welders_history (welder_id, user_id, action, admin_id) VALUES (?, ?, ?, ?)";
+
+        try (Connection conn = getConnection();
+             PreparedStatement psUpdate = conn.prepareStatement(sqlUpdate);
+             PreparedStatement psHist = conn.prepareStatement(sqlHistory)) {
+
+            psUpdate.setLong(1, userId);
+            psUpdate.setInt(2, welderId);
+            int affected = psUpdate.executeUpdate();
+
+            if (affected > 0) {
+                psHist.setInt(1, welderId);
+                psHist.setLong(2, userId);
+                psHist.setString(3, adminId == null ? "TAKEN" : "FORCE_TAKEN");
+                if (adminId != null) {
+                    psHist.setLong(4, adminId);
+                } else {
+                    psHist.setNull(4, java.sql.Types.INTEGER);
+                }
+                psHist.executeUpdate();
+                return true;
+            }
+        } catch (SQLException e) { e.printStackTrace(); }
+        return false;
+    }
+
+    public static boolean returnWelder(int welderId, long userId, Long adminId) {
+        String sqlUpdate = "UPDATE welders SET status = 'ON_BASE', assigned_to = NULL, assigned_time = NULL WHERE id = ?";
+        String sqlHistory = "INSERT INTO welders_history (welder_id, user_id, action, admin_id) VALUES (?, ?, ?, ?)";
+
+        try (Connection conn = getConnection();
+             PreparedStatement psUpdate = conn.prepareStatement(sqlUpdate);
+             PreparedStatement psHist = conn.prepareStatement(sqlHistory)) {
+
+            psUpdate.setInt(1, welderId);
+            int affected = psUpdate.executeUpdate();
+
+            if (affected > 0) {
+                psHist.setInt(1, welderId);
+                psHist.setLong(2, userId);
+                psHist.setString(3, adminId == null ? "RETURNED" : "FORCE_RETURNED");
+                if (adminId != null) {
+                    psHist.setLong(4, adminId);
+                } else {
+                    psHist.setNull(4, java.sql.Types.INTEGER);
+                }
+                psHist.executeUpdate();
+                return true;
+            }
+        } catch (SQLException e) { e.printStackTrace(); }
+        return false;
+    }
+
+    public static List<String[]> getWeldersStatus() {
+        List<String[]> list = new ArrayList<>();
+        // Возвращает: id, name, status, user_name, assigned_time, user_id
+        String sql = "SELECT w.id, w.name, w.status, u.full_name, w.assigned_time, w.assigned_to " +
+                "FROM welders w LEFT JOIN users u ON w.assigned_to = u.id ORDER BY w.status DESC, w.name";
+        try (Connection conn = getConnection(); Statement stmt = conn.createStatement(); ResultSet rs = stmt.executeQuery(sql)) {
+            while (rs.next()) {
+                list.add(new String[]{
+                        String.valueOf(rs.getInt("id")),
+                        rs.getString("name"),
+                        rs.getString("status"),
+                        rs.getString("full_name") != null ? rs.getString("full_name") : "",
+                        rs.getString("assigned_time") != null ? rs.getString("assigned_time") : "",
+                        rs.getString("assigned_to") != null ? rs.getString("assigned_to") : ""
+                });
+            }
+        } catch (SQLException e) { e.printStackTrace(); }
+        return list;
+    }
+
+    public static String getWeldersHistoryText() {
+        StringBuilder sb = new StringBuilder("📜 <b>Журнал движений сварочных аппаратов:</b>\n<i>(последние 40 операций)</i>\n\n");
+        String sql = """
+            SELECT datetime(h.action_time, 'localtime') as local_time, w.name, u.full_name, h.action, a.full_name as admin_name
+            FROM welders_history h
+            JOIN welders w ON h.welder_id = w.id
+            JOIN users u ON h.user_id = u.id
+            LEFT JOIN users a ON h.admin_id = a.id
+            ORDER BY h.action_time DESC LIMIT 40
+        """;
+        boolean hasItems = false;
+        try (Connection conn = getConnection(); Statement stmt = conn.createStatement(); ResultSet rs = stmt.executeQuery(sql)) {
+            while (rs.next()) {
+                hasItems = true;
+                String time = rs.getString("local_time");
+                String welderName = rs.getString("name");
+                String userName = rs.getString("full_name");
+                String action = rs.getString("action");
+                String adminName = rs.getString("admin_name");
+
+                String actionRu = switch (action) {
+                    case "TAKEN" -> "взял(а)";
+                    case "RETURNED" -> "сдал(а) на базу";
+                    case "FORCE_TAKEN" -> "выдано принудительно админом";
+                    case "FORCE_RETURNED" -> "возвращено принудительно админом";
+                    default -> action;
+                };
+
+                String adminSuffix = (adminName != null && !action.equals("TAKEN") && !action.equals("RETURNED")) ? " (" + adminName + ")" : "";
+
+                String icon = (action.contains("TAKEN")) ? "🔴" : "🟢";
+                sb.append(String.format("%s <i>%s</i>\n<b>%s</b> — %s <b>%s</b>%s\n\n",
+                        icon, time, userName, actionRu, welderName, adminSuffix));
+            }
+        } catch (SQLException e) { e.printStackTrace(); }
+        return hasItems ? sb.toString() : "📜 История пока пуста.";
+    }
+
+    public static String getWelderNameById(int id) {
+        try (Connection conn = getConnection(); PreparedStatement ps = conn.prepareStatement("SELECT name FROM welders WHERE id = ?")) {
+            ps.setInt(1, id);
+            ResultSet rs = ps.executeQuery();
+            if (rs.next()) return rs.getString("name");
+        } catch (SQLException e) { e.printStackTrace(); }
+        return "Неизвестный аппарат";
+    }
+
+    // =========================================================================
+    // ОСТАЛЬНОЙ СТАРЫЙ КОД (БЕЗ ИЗМЕНЕНИЙ)
+    // =========================================================================
 
     public static String saveImportedMaterials(List<ExcelImporter.MaterialRow> rows) {
         try (Connection conn = getConnection()) {
@@ -311,6 +478,21 @@ public class DatabaseManager {
             if (rs.next()) return rs.getString("full_name");
         } catch (SQLException e) { e.printStackTrace(); }
         return tgName;
+    }
+
+    // Метод для получения полного имени пользователя по его ID
+    public static String getUserFullName(long userId) {
+        try (Connection conn = getConnection();
+             PreparedStatement ps = conn.prepareStatement("SELECT full_name FROM users WHERE id = ?")) {
+            ps.setLong(1, userId);
+            ResultSet rs = ps.executeQuery();
+            if (rs.next()) {
+                return rs.getString("full_name");
+            }
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
+        return "Сотрудник (ID: " + userId + ")";
     }
 
     public static String getServiceTariffsText() {
@@ -939,7 +1121,11 @@ public class DatabaseManager {
         List<String> names = new ArrayList<>();
         try (Connection conn = getConnection();
              Statement stmt = conn.createStatement();
-             ResultSet rs = stmt.executeQuery("SELECT DISTINCT excel_name FROM schedules ORDER BY excel_name")) {
+             // ВАЖНОЕ ИЗМЕНЕНИЕ: Исключаем фамилии, которые уже кем-то заняты
+             ResultSet rs = stmt.executeQuery(
+                     "SELECT DISTINCT excel_name FROM schedules " +
+                             "WHERE excel_name NOT IN (SELECT excel_name FROM user_excel_names) " +
+                             "ORDER BY excel_name")) {
             while (rs.next()) names.add(rs.getString("excel_name"));
         } catch (SQLException e) { e.printStackTrace(); }
         return names;
@@ -1299,7 +1485,10 @@ public class DatabaseManager {
                 };
                 sb.append(String.format("👤 <b>%s</b>\n   ID: <code>%d</code>\n   Связь: <a href=\"tg://user?id=%d\">Написать в ЛС</a>\n   Статус: %s\n", rs.getString("full_name"), id, id, status));
                 if ("BANNED".equals(role) || "PENDING".equals(role)) sb.append(String.format("   Разблокировать/Одобрить: /unban_%d\n", id));
-                else if (!"ADMIN".equals(role)) sb.append(String.format("   Блокировать: /ban_%d\n", id));
+                else if (!"ADMIN".equals(role)) {
+                    sb.append(String.format("   Блокировать: /ban_%d\n", id));
+                    sb.append(String.format("   Сбросить ФИО: /unbind_%d\n", id));
+                }
                 sb.append("\n");
             }
         } catch (SQLException e) { e.printStackTrace(); }
@@ -1314,6 +1503,26 @@ public class DatabaseManager {
             if (updated > 0) return ban ? "✅ Пользователь " + targetUserId + " заблокирован. Бот больше не будет ему отвечать." : "✅ Пользователь разблокирован.";
             return "❌ Пользователь не найден или это администратор (которого нельзя заблокировать).";
         } catch (SQLException e) { return "❌ Ошибка базы данных."; }
+    }
+
+    public static boolean unbindUser(long userId) {
+        try (Connection conn = getConnection()) {
+            // 1. Удаляем привязку к графику
+            PreparedStatement ps1 = conn.prepareStatement("DELETE FROM user_excel_names WHERE user_id = ?");
+            ps1.setLong(1, userId);
+            int rows = ps1.executeUpdate();
+
+            // 2. Откатываем имя в основной таблице до базового "Сотрудник",
+            // чтобы путаница с "Белевичами" сразу исчезла
+            if (rows > 0) {
+                PreparedStatement ps2 = conn.prepareStatement("UPDATE users SET full_name = ? WHERE id = ?");
+                ps2.setString(1, "Отвязанный Сотрудник " + userId);
+                ps2.setLong(2, userId);
+                ps2.executeUpdate();
+                return true;
+            }
+        } catch (SQLException e) { e.printStackTrace(); }
+        return false;
     }
 
     public static class ParsedTool {
@@ -1362,9 +1571,6 @@ public class DatabaseManager {
         return hasTools ? sb.toString() : "🪛 За вами пока не закреплен инструмент.";
     }
 
-    // ========================================================
-    // ОБНОВЛЕННЫЙ АУДИТ (С КНОПКАМИ И ГАЛОЧКАМИ)
-    // ========================================================
     public static String getToolsAuditText() {
         StringBuilder sb = new StringBuilder("📊 <b>Аудит инструмента:</b>\n\n");
 
@@ -1416,7 +1622,6 @@ public class DatabaseManager {
                 String invNum = rsAssigned.getString("inv_number");
                 int toolId = rsAssigned.getInt("tool_id");
 
-                // Форматируем красивую строчку с пользователем и командой быстрого возврата /take_
                 String displayLine = "   ✅ <b>" + workerName + "</b>";
                 if (invNum != null && !invNum.isEmpty() && !invNum.equals("null")) {
                     displayLine += " (инв: " + invNum + ")";
@@ -1434,8 +1639,6 @@ public class DatabaseManager {
                     int[] counts = entry.getValue();
 
                     sb.append("🔧 <b>").append(toolName).append("</b>");
-
-                    // Кнопка /give_ показывается, только если есть что выдавать (на складе > 0)
                     if (counts[2] > 0) {
                         sb.append(" 👉 /give_").append(counts[0]);
                     }
@@ -1462,7 +1665,6 @@ public class DatabaseManager {
         return sb.toString();
     }
 
-    // НОВЫЙ МЕТОД: Узнать название инструмента по его ID (для заголовка меню)
     public static String getToolNameById(int toolId) {
         try (Connection conn = getConnection();
              PreparedStatement ps = conn.prepareStatement("SELECT name FROM tools WHERE id = ?")) {
@@ -1473,17 +1675,14 @@ public class DatabaseManager {
         return "Неизвестный инструмент";
     }
 
-    // НОВЫЙ МЕТОД: Массовая (быстрая) выдача первого свободного инструмента из группы
     public static String[] assignAnyAvailableToolFast(int firstId, long userId) {
         try (Connection conn = getConnection()) {
-            // 1. Узнаем название инструмента по id
             PreparedStatement psName = conn.prepareStatement("SELECT name FROM tools WHERE id = ?");
             psName.setInt(1, firstId);
             ResultSet rsName = psName.executeQuery();
             if (!rsName.next()) return new String[]{"ERROR", "Группа инструментов не найдена."};
             String toolName = rsName.getString("name");
 
-            // 2. Ищем первый свободный инструмент с таким же названием на складе
             PreparedStatement psFind = conn.prepareStatement("SELECT id, inv_number FROM tools WHERE name = ? AND status = 'IN_STOCK' LIMIT 1");
             psFind.setString(1, toolName);
             ResultSet rsFind = psFind.executeQuery();
@@ -1492,19 +1691,16 @@ public class DatabaseManager {
             int toolId = rsFind.getInt("id");
             String invNum = rsFind.getString("inv_number");
 
-            // 3. Узнаем фамилию сотрудника для вывода всплывающего уведомления
             PreparedStatement psUser = conn.prepareStatement("SELECT full_name FROM users WHERE id = ?");
             psUser.setLong(1, userId);
             ResultSet rsUser = psUser.executeQuery();
             String userName = rsUser.next() ? rsUser.getString("full_name") : "Сотрудник";
 
-            // 4. Закрепляем инструмент за человеком
             PreparedStatement psUpdate = conn.prepareStatement("UPDATE tools SET status = 'ASSIGNED', assigned_to = ? WHERE id = ?");
             psUpdate.setLong(1, userId);
             psUpdate.setInt(2, toolId);
             psUpdate.executeUpdate();
 
-            // Формируем тексты: один короткий для всплывашки (Toast), другой для отправки мастеру в ЛС
             String shortMsg = "✅ Выдано: " + userName;
             String userMsg = String.format("🔔 <b>Вам выдан новый инструмент!</b>\n\n🪛 <b>%s</b>\n🔢 Инв. №: <code>%s</code>", toolName, invNum);
 

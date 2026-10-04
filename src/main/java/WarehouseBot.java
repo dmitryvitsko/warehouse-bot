@@ -30,6 +30,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
     private final Map<Long, Integer> waitingToolWriteOffReason = new HashMap<>();
     private final Map<Long, Integer> waitingOrshPhoto = new HashMap<>();
     private final Map<Long, Integer> waitingOrshProblemReason = new HashMap<>();
+    private final Map<Long, Integer> waitingDirContactCat = new HashMap<>();
 
     // Блокировка меню сварочником (для бота-надзирателя)
     private final Map<Long, Integer> forceWelderReturnIds = new HashMap<>();
@@ -242,13 +243,50 @@ public class WarehouseBot extends TelegramLongPollingBot {
         }
     }
 
+    // Метод-файрвол: блокирует все действия, пока сотрудник не выберет фамилию
+    private boolean checkUnboundAndNotify(long chatId, String role) {
+        // Админов не блокируем, иначе вы не сможете загрузить сам график с фамилиями
+        if ("ADMIN".equals(role)) return false;
+
+        String excelName = DatabaseManager.getUserExcelName(chatId);
+        if (excelName == null) {
+            List<String> availableNames = DatabaseManager.getAvailableExcelNames();
+            if (availableNames.isEmpty()) {
+                sendDirectNotification(chatId, "⚠ <b>Внимание!</b>\nВам необходимо идентифицировать себя, но администратор еще не загрузил график с новыми фамилиями. Пожалуйста, обратитесь к нему напрямую.");
+            } else {
+                InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
+                List<List<InlineKeyboardButton>> rows = new ArrayList<>();
+                for (String name : availableNames) {
+                    InlineKeyboardButton btn = new InlineKeyboardButton(name);
+                    btn.setCallbackData("BIND_NAME:" + name);
+                    rows.add(List.of(btn));
+                }
+                markup.setKeyboard(rows);
+
+                String alertText = "⚠️ <b>ОГРАНИЧЕНИЕ ДОСТУПА!</b>\n\n" +
+                        "Остальной функционал бота временно заблокирован.\n" +
+                        "👇 <b>Пожалуйста, выберите СВОЮ настоящую фамилию из списка ниже, чтобы продолжить работу:</b>";
+
+                SendMessage msg = new SendMessage(String.valueOf(chatId), alertText);
+                msg.setParseMode("HTML");
+                msg.setReplyMarkup(markup);
+                try { execute(msg); } catch (TelegramApiException e) { e.printStackTrace(); }
+            }
+            return true; // Возвращаем true -> блокируем выполнение остального кода
+        }
+        return false;
+    }
+
     @Override
     public void onUpdateReceived(Update update) {
         if (update.hasMessage() && update.getMessage().hasDocument()) {
             long chatId = update.getMessage().getChatId();
             String firstName = update.getMessage().getFrom().getFirstName();
             String role = checkRoleAndNotify(chatId, firstName);
+
             if ("BANNED".equals(role) || "PENDING".equals(role)) return;
+            if (checkUnboundAndNotify(chatId, role)) return; // <-- Файрвол документов
+
             if (!"ADMIN".equals(role)) {
                 sendMenu(chatId, role, "❌ Загружать файлы может только Администратор (МОЛ).");
                 return;
@@ -295,6 +333,9 @@ public class WarehouseBot extends TelegramLongPollingBot {
             String firstName = update.getMessage().getFrom().getFirstName();
             String role = checkRoleAndNotify(chatId, firstName);
 
+            if ("BANNED".equals(role) || "PENDING".equals(role)) return;
+            if (checkUnboundAndNotify(chatId, role)) return; // <-- Файрвол для фото
+
             if (isAdminBlockedByPendingRequests(chatId, role)) return;
 
             if (waitingOrshPhoto.containsKey(chatId)) {
@@ -330,11 +371,89 @@ public class WarehouseBot extends TelegramLongPollingBot {
             }
         }
 
+        // =========================================================
+        // ОБРАБОТКА ПОДЕЛИТЬСЯ КОНТАКТОМ (ИЗ ТЕЛЕФОННОЙ КНИГИ)
+        // =========================================================
+        if (update.hasMessage() && update.getMessage().hasContact()) {
+            long chatId = update.getMessage().getChatId();
+            String firstName = update.getMessage().getFrom().getFirstName();
+            String role = checkRoleAndNotify(chatId, firstName);
+
+            if ("BANNED".equals(role) || "PENDING".equals(role)) return;
+            if (checkUnboundAndNotify(chatId, role)) return; // Файрвол
+
+            if (waitingDirContactCat.containsKey(chatId)) {
+                int category = waitingDirContactCat.remove(chatId);
+
+                // Достаем объект контакта
+                org.telegram.telegrambots.meta.api.objects.Contact contact = update.getMessage().getContact();
+
+                // Склеиваем имя и фамилию
+                String contactName = contact.getFirstName();
+                if (contact.getLastName() != null && !contact.getLastName().isEmpty()) {
+                    contactName += " " + contact.getLastName();
+                }
+
+                // Достаем телефон (Телеграм иногда отдает номер без плюса в начале, исправляем это)
+                String contactPhone = contact.getPhoneNumber();
+                if (!contactPhone.startsWith("+")) {
+                    contactPhone = "+" + contactPhone;
+                }
+
+                // Формируем красивую строку
+                String textToSave = contactName + ": " + contactPhone;
+
+                if (DatabaseManager.addDirectoryContact(category, textToSave, chatId)) {
+                    sendMenu(chatId, role, "✅ <b>Контакт успешно добавлен из телефонной книги!</b>\nОн теперь отображается в справочнике у всех сотрудников.");
+                    sendDirectory(chatId, role); // Сразу показываем обновленный справочник
+                } else {
+                    sendMenu(chatId, role, "❌ Ошибка при сохранении контакта.");
+                }
+                return;
+            }
+        }
+
         if (update.hasCallbackQuery()) {
             long chatId = update.getCallbackQuery().getMessage().getChatId();
             String data = update.getCallbackQuery().getData();
             String firstName = update.getCallbackQuery().getFrom().getFirstName();
             String role = checkRoleAndNotify(chatId, firstName);
+
+            if ("BANNED".equals(role) || "PENDING".equals(role)) return;
+
+            if (!data.startsWith("BIND_NAME:") && checkUnboundAndNotify(chatId, role)) {
+                AnswerCallbackQuery answer = new AnswerCallbackQuery();
+                answer.setCallbackQueryId(update.getCallbackQuery().getId());
+                answer.setText("⚠️ Сначала выберите фамилию!");
+                answer.setShowAlert(true);
+                try { execute(answer); } catch (TelegramApiException e) {}
+                return;
+            }
+
+            if (data.equals("DIR_ADD_MENU")) {
+                sendDirectoryAddMenu(chatId);
+                return;
+            }
+            if (data.startsWith("DIR_CAT:")) {
+                int category = Integer.parseInt(data.split(":")[1]);
+                waitingDirContactCat.put(chatId, category);
+                sendCancelKeyboard(chatId, "✍️️ <b>Отлично!</b>\n\nВы можете <b>поделиться контактом</b> из телефонной книги (📎 Скрепка ➔ Контакт)\n\n👇 ИЛИ напишите данные вручную одним сообщением:\n<i>Пример: Электрик Иванов Иван: +375(29)111-22-33</i>");
+                return;
+            }
+            if (data.equals("DIR_DEL_MENU") && "ADMIN".equals(role)) {
+                sendDirectoryDelMenu(chatId);
+                return;
+            }
+            if (data.startsWith("DIR_DEL:") && "ADMIN".equals(role)) {
+                int contactId = Integer.parseInt(data.split(":")[1]);
+                DatabaseManager.deleteDirectoryContact(contactId);
+                sendDirectoryDelMenu(chatId); // Обновляем список после удаления
+                return;
+            }
+            if (data.equals("DIR_BACK")) {
+                sendDirectory(chatId, role);
+                return;
+            }
 
             // =========================================================
             // СВАРОЧНЫЕ АППАРАТЫ: ОБРАБОТКА КНОПОК
@@ -348,7 +467,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
                         String userName = DatabaseManager.getUserFullName(chatId);
                         String welderName = DatabaseManager.getWelderNameById(welderId);
                         sendDirectNotification(DatabaseManager.ADMIN_ID,
-                                "ℹ️ <b>Сварочный аппарат взят!</b>\n👷‍♂️️ " + userName + " только что взял аппарат <b>" + welderName + "</b>.");
+                                "ℹ️ <b>Сварочный аппарат взят!</b>\n👷‍♂ " + userName + " только что взял аппарат <b>" + welderName + "</b>.");
                     }
                     sendWeldersMenu(chatId, role);
                 } else {
@@ -516,8 +635,69 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 sendMenu(chatId, role, result);
                 return;
             }
-            if (data.equals("TOOL_MENU_AUDIT") && "ADMIN".equals(role)) {
+            if (data.equals("TOOL_MAIN_MENU") && "ADMIN".equals(role)) {
+                sendToolAdminMenu(chatId);
+                return;
+            }
+            if (data.equals("TOOL_MENU_AUDIT_ALL") && "ADMIN".equals(role)) {
                 sendMenu(chatId, role, DatabaseManager.getToolsAuditText());
+                return;
+            }
+            if (data.equals("TOOL_MENU_AUDIT_USERS") && "ADMIN".equals(role)) {
+                sendUsersToolSummaryMenu(chatId);
+                return;
+            }
+            if (data.equals("TOOL_MENU_AUDIT_NOTIFY") && "ADMIN".equals(role)) {
+                sendMenu(chatId, role, "⏳ Начинаю рассылку уведомлений...");
+                List<Long> workersWithMaterials = DatabaseManager.getUsersWithBalances();
+                int successCount = 0;
+                for (Long workerId : workersWithMaterials) {
+                    String balanceText = DatabaseManager.getUserBalanceText(workerId);
+                    String alertMsg = "⚠️ <b>ВНИМАНИЕ: АУДИТ ОСТАТКОВ!</b> ⚠️\n\n"
+                            + "Напоминаем о необходимости закрыть подотчет до конца месяца. "
+                            + "Пожалуйста, <b>спишите</b> использованные материалы в квитанции/заявки "
+                            + "или <b>верните</b> остатки на склад!\n\n" + balanceText;
+                    try {
+                        SendMessage msg = new SendMessage(String.valueOf(workerId), alertMsg);
+                        msg.setParseMode("HTML");
+                        execute(msg);
+                        successCount++;
+                    } catch (TelegramApiException e) {}
+                }
+                sendMenu(chatId, role, "✅ Уведомления об аудите успешно доставлены <b>" + successCount + "</b> сотрудникам!");
+
+                // Возвращаем админ-меню обратно после завершения
+                sendToolAdminMenu(chatId);
+                return;
+            }
+            if (data.startsWith("T_SUMM_U:") && "ADMIN".equals(role)) {
+                long targetUserId = Long.parseLong(data.split(":")[1]);
+                sendUserToolSummary(chatId, targetUserId);
+                return;
+            }
+            if (data.startsWith("T_SUMM_RET:") && "ADMIN".equals(role)) {
+                String[] parts = data.split(":");
+                int toolId = Integer.parseInt(parts[1]);
+                long targetUserId = Long.parseLong(parts[2]);
+
+                DatabaseManager.returnToolToWarehouse(toolId); // Возвращаем на склад
+
+                // Показываем всплывающее уведомление (Toast)
+                AnswerCallbackQuery answer = new AnswerCallbackQuery();
+                answer.setCallbackQueryId(update.getCallbackQuery().getId());
+                answer.setText("✅ Инструмент возвращен!");
+                answer.setShowAlert(false);
+                try { execute(answer); } catch (TelegramApiException e) {}
+
+                // МГНОВЕННО обновляем меню пользователя (чтобы кнопка инструмента пропала)
+                sendUserToolSummary(chatId, targetUserId);
+                return;
+            }
+            if (data.startsWith("T_SUMM_RALL:") && "ADMIN".equals(role)) {
+                long targetUserId = Long.parseLong(data.split(":")[1]);
+                String result = DatabaseManager.returnAllUserToolsToWarehouse(targetUserId);
+                sendMenu(chatId, role, result);
+                sendUsersToolSummaryMenu(chatId); // Возвращаем админа к списку людей
                 return;
             }
             if (data.equals("TOOL_MENU_ASSIGN") && "ADMIN".equals(role)) {
@@ -555,8 +735,6 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 sendMenu(chatId, role, "❌ Пользователь " + targetId + " заблокирован.");
                 return;
             }
-
-            if ("BANNED".equals(role) || "PENDING".equals(role)) return;
 
             if (data.equals("CART_MENU")) {
                 sendCartMenu(chatId, role);
@@ -615,7 +793,16 @@ public class WarehouseBot extends TelegramLongPollingBot {
             if (data.startsWith("BIND_NAME:")) {
                 String excelName = data.substring(10);
                 DatabaseManager.bindUserToExcelName(chatId, excelName);
-                sendMenu(chatId, role, "✅ Отлично! Ваш профиль привязан к: <b>" + excelName + "</b>\n\n" + DatabaseManager.getFormattedSchedule(excelName));
+
+                // Убрали автоматический вывод графика, оставили только подтверждение
+                sendMenu(chatId, role, "✅ Отлично! Ваш профиль успешно привязан к: <b>" + excelName + "</b>.\n\nТеперь вам полностью доступны все функции системы.");
+                return;
+            }
+
+            if (data.startsWith("VIEW_SCHED:")) {
+                String excelName = data.substring(11);
+                // Отправляем красивый график выбранного сотрудника
+                sendMenu(chatId, role, DatabaseManager.getFormattedSchedule(excelName));
                 return;
             }
 
@@ -802,13 +989,73 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 return;
             }
 
+            if (checkUnboundAndNotify(chatId, role)) return;
+
+            if (waitingDirContactCat.containsKey(chatId)) {
+                int category = waitingDirContactCat.remove(chatId);
+                if (DatabaseManager.addDirectoryContact(category, text.trim(), chatId)) {
+                    sendMenu(chatId, role, "✅ <b>Контакт успешно добавлен!</b>\nОн теперь отображается в справочнике у всех сотрудников.");
+                    sendDirectory(chatId, role); // Сразу показываем обновленный справочник
+                } else {
+                    sendMenu(chatId, role, "❌ Ошибка при сохранении контакта.");
+                }
+                return;
+            }
+
             if (text.startsWith("/unbind_") && "ADMIN".equals(role)) {
                 long targetId = Long.parseLong(text.replace("/unbind_", ""));
-                if (DatabaseManager.unbindUser(targetId)) {
-                    sendMenu(chatId, role, "✅ Привязка сброшена! Имя пользователя очищено.");
-                    sendDirectNotification(targetId, "⚠️ <b>Внимание!</b>\nАдминистратор сбросил вашу привязку к графику из-за ошибки.\n\nПожалуйста, нажмите кнопку <b>«🗓 Мой график»</b> и выберите СВОЮ настоящую фамилию из списка свободных.");
+
+                // --- НОВЫЙ БЛОК: Запрашиваем у Телеграма реальное имя ---
+                String realTgName = "Сотрудник";
+                try {
+                    org.telegram.telegrambots.meta.api.methods.groupadministration.GetChat getChat =
+                            new org.telegram.telegrambots.meta.api.methods.groupadministration.GetChat(String.valueOf(targetId));
+                    org.telegram.telegrambots.meta.api.objects.Chat targetChat = execute(getChat);
+
+                    if (targetChat.getFirstName() != null) {
+                        realTgName = targetChat.getFirstName();
+                        if (targetChat.getLastName() != null) {
+                            realTgName += " " + targetChat.getLastName();
+                        }
+                    } else if (targetChat.getUserName() != null) {
+                        realTgName = targetChat.getUserName();
+                    }
+                } catch (Exception e) {
+                    // Если Телеграм не ответил (например, скрытый профиль), оставляем ID
+                    realTgName = "ID " + targetId;
+                }
+                // --------------------------------------------------------
+
+                // Вызываем отвязку с передачей реального имени
+                if (DatabaseManager.unbindUser(targetId, realTgName)) {
+                    sendMenu(chatId, role, "✅ Пользователь сброшен. Ему отправлено меню выбора ФИО!");
+
+                    // Получаем список свободных фамилий
+                    List<String> availableNames = DatabaseManager.getAvailableExcelNames();
+
+                    if (availableNames.isEmpty()) {
+                        sendDirectNotification(targetId, "⚠ <b>Внимание! Требование Администратора:</b>\nВам необходимо идентифицировать себя, но администратор еще не загрузил график с новыми фамилиями. Пожалуйста, обратитесь к нему напрямую.");
+                    } else {
+                        InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
+                        List<List<InlineKeyboardButton>> rows = new ArrayList<>();
+                        for (String name : availableNames) {
+                            InlineKeyboardButton btn = new InlineKeyboardButton(name);
+                            btn.setCallbackData("BIND_NAME:" + name);
+                            rows.add(List.of(btn));
+                        }
+                        markup.setKeyboard(rows);
+
+                        String alertText = "⚠️ <b>Внимание! Требование Администратора:</b>\n\n" +
+                                "Вам необходимо идентифицировать себя в системе, чтобы ваш аккаунт не был заблокирован.\n\n" +
+                                "👇 <b>Пожалуйста, выберите СВОЮ настоящую фамилию из списка ниже:</b>";
+
+                        SendMessage msg = new SendMessage(String.valueOf(targetId), alertText);
+                        msg.setParseMode("HTML");
+                        msg.setReplyMarkup(markup);
+                        try { execute(msg); } catch (TelegramApiException e) { e.printStackTrace(); }
+                    }
                 } else {
-                    sendMenu(chatId, role, "❌ Ошибка: пользователь не найден или у него нет привязки.");
+                    sendMenu(chatId, role, "❌ Ошибка: пользователь не найден в базе данных.");
                 }
                 return;
             }
@@ -835,6 +1082,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 waitingToolWriteOffReason.remove(chatId);
                 waitingOrshPhoto.remove(chatId);
                 waitingOrshProblemReason.remove(chatId);
+                waitingDirContactCat.remove(chatId);
 
                 if (text.equals("❌ Отменить")) sendMenu(chatId, role, "🚫 <b>Действие отменено.</b>");
                 else sendMenu(chatId, role, "Вы вернулись в главное меню:");
@@ -852,8 +1100,10 @@ public class WarehouseBot extends TelegramLongPollingBot {
                     text.startsWith("📊") || text.startsWith("📥") || text.startsWith("📑") ||
                     text.startsWith("🗓") || text.startsWith("🔍") || text.startsWith("📢") ||
                     text.startsWith("👥") || text.startsWith("🪛") || text.startsWith("🛠") ||
-                    text.startsWith("📞") || text.startsWith("🔌") || text.equals("/start")) {
+                    text.startsWith("📞") || text.startsWith("🔌") || text.startsWith("👁") || text.equals("/start")) {
                 waitingTakeMaterialId.remove(chatId);
+                waitingDirContactCat.remove(chatId);
+
                 writeOffSessions.remove(chatId);
                 fileWaitState.remove(chatId);
                 waitingToolWriteOffReason.remove(chatId);
@@ -1009,7 +1259,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
                     }
                 }
                 case "🔌 Сварочные аппараты" -> sendWeldersMenu(chatId, role);
-                case "📞 Справочник" -> sendMenu(chatId, role, getDirectoryText());
+                case "📞 Справочник" -> sendDirectory(chatId, role);
                 case "🗓 График работ" -> sendScheduleMenu(chatId);
                 case "🗓 Мой график" -> {
                     String excelName = DatabaseManager.getUserExcelName(chatId);
@@ -1019,6 +1269,14 @@ public class WarehouseBot extends TelegramLongPollingBot {
                         List<String> names = DatabaseManager.getAvailableExcelNames();
                         if (names.isEmpty()) sendMenu(chatId, role, "ℹ График работ еще не загружен администратором.");
                         else sendNameBindingMenu(chatId, names);
+                    }
+                }
+                case "👁 График коллеги" -> {
+                    List<String> names = DatabaseManager.getAllExcelNames();
+                    if (names.isEmpty()) {
+                        sendMenu(chatId, role, "ℹ График работ еще не загружен администратором.");
+                    } else {
+                        sendColleagueSelectionMenu(chatId, names);
                     }
                 }
                 case "🤝 С кем я в смене?" -> {
@@ -1077,27 +1335,6 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 case "📑 Скачать отчет за месяц" -> {
                     if (role.equals("ADMIN")) sendExcelReport(chatId, role);
                 }
-                case "🔍 Аудит остатков" -> {
-                    if (role.equals("ADMIN")) {
-                        sendMenu(chatId, role, "⏳ Начинаю рассылку уведомлений...");
-                        List<Long> workersWithMaterials = DatabaseManager.getUsersWithBalances();
-                        int successCount = 0;
-                        for (Long workerId : workersWithMaterials) {
-                            String balanceText = DatabaseManager.getUserBalanceText(workerId);
-                            String alertMsg = "⚠️ <b>ВНИМАНИЕ: АУДИТ ОСТАТКОВ!</b> ⚠️\n\n"
-                                    + "Напоминаем о необходимости закрыть подотчет до конца месяца. "
-                                    + "Пожалуйста, <b>спишите</b> использованные материалы в квитанции/заявки "
-                                    + "или <b>верните</b> остатки на склад!\n\n" + balanceText;
-                            try {
-                                SendMessage msg = new SendMessage(String.valueOf(workerId), alertMsg);
-                                msg.setParseMode("HTML");
-                                execute(msg);
-                                successCount++;
-                            } catch (TelegramApiException e) {}
-                        }
-                        sendMenu(chatId, role, "✅ Уведомления об аудите успешно доставлены <b>" + successCount + "</b> сотрудникам!");
-                    }
-                }
                 case "📢 Сделать рассылку" -> {
                     if (role.equals("ADMIN")) {
                         fileWaitState.put(chatId, "WAIT_BROADCAST_TEXT");
@@ -1125,55 +1362,94 @@ public class WarehouseBot extends TelegramLongPollingBot {
     }
 
     private String getDirectoryText() {
-        return """
-            📞 <b>ТЕЛЕФОННЫЙ СПРАВОЧНИК</b>
-            
-            🏢 <b>Руководство ЛКЦ</b>
-            ▪️ Нач. цеха Богино А.Е.: +375(17) 335-24-44
-            ▪️ Зам. нач. цеха Жук С.Г.: +375(17) 334-44-45
-            
-            👷‍♂ <b>ИТР УЛКС №2</b>
-            ▪️ Нач. УЛКС №2 Лазуко С.В.: +375(17) 200-02-98, +375(29) 501-01-11
-            ▪️ Зам. нач. УЛКС №2 Журко А.Н.: +375(17) 264-93-74, +375(29) 231-69-23
-            ▪ Рук. каб. группы Прохорчик В.Ю.: +375(17) 200-40-40, +375(29) 176-58-88
-            ▪️ Рук. гр. технадзора Снитко А.В.: +375(33) 347-28-85
-            ▪️ Рук. гр. малопарщиков Никитин Д.Д.: +375(44) 752-02-69
-            ▪ Рук. изм. группы Лабуза С.И.: +375(29) 701-88-29
-            
-            💻 <b>Технический отдел</b>
-            ▪ Рук. гр. технадзора Шашков В.П.: +375(29) 373-35-55
-            ▪️ Инж. технадзора Кононова Светлана: +375(29) 577-57-46
-            ▪ Магистральщики (Протасевич Юлия): +375(29) 560-80-82
-            ▪️ Профсоюзные дела (Луговцова Оксана): +375(29) 317-19-56
-            
-            🗂 <b>Администрация</b>
-            ▪️ Профком (Нестерова Е.Ю.): +375(17) 359-45-70
-            ▪️ Бухгалтерия по ЗП (Ромашко Ю.Г.): +375(17) 359-45-20
-            ▪️ Специалист по кадрам (Субач Е.В.): +375(17) 359-45-03
-            
-            🚗 <b>АТЦ</b>
-            ▪️ Начальник Савицкий А.В.: +375(17) 369-05-25, +375(33) 603-32-73
-            ▪️ Зам. начальника Болбас Р.А.: +375(17) 369-03-93, +375(29) 840-78-37
-            ▪️ Инж. по БД Гузов А.П.: +375(17) 369-05-27, +375(29) 779-11-88
-            
-            🔌 <b>Станционщики (магистраль / проключения)</b>
-            ▪️ Инженер Ивашкевич Дарья: +375(29) 555-38-48
-            
-            📺 <b>Привязка СМЛ приставок</b>
-            ▪️ Дневное время (Ольга): +375(29) 788-84-98
-            ▪️ Вечернее время: +375(17) 334-56-24, +375(17) 328-46-56, +375(17) 252-44-55, +375(17) 359-41-10
-            
-            🎧 <b>Диспетчера и админы (закрытие заявок)</b>
-            ▪ Диспетчеры ЦАБР: +375(17) 288-47-10
-            ▪️ Инженер ЦАБР: +375(17) 268-46-26
-            ▪ Админы: +375(17) 306-29-56, +375(33) 603-38-81
-            ▪ После 20:00: +375(17) 306-29-59
-            ▪️️ VPN: +375(17) 203-66-86
-            
-            📹 <b>Прочее</b>
-            ▪ Видеоконтроль (Андрей): +375(17) 359-40-30
-            ▪️ РСМОБ: +375(17) 357-96-30
-            """;
+        Map<Integer, List<String>> dyn = DatabaseManager.getDynamicContacts();
+        StringBuilder sb = new StringBuilder("📞 <b>ТЕЛЕФОННЫЙ СПРАВОЧНИК</b>\n\n");
+
+        sb.append("🏢 <b>Руководство ЛКЦ</b>\n▪️ Нач. цеха Богино А.Е.: +375(17) 335-24-44\n▪️ Зам. нач. цеха Жук С.Г.: +375(17) 334-44-45\n");
+        for (String s : dyn.getOrDefault(1, new ArrayList<>())) sb.append("▪️ ").append(s).append("\n");
+        sb.append("\n");
+
+        sb.append("👷‍♂ <b>ИТР УЛКС №2</b>\n▪️ Нач. УЛКС №2 Лазуко С.В.: +375(17) 200-02-98, +375(29) 501-01-11\n▪ Зам. нач. УЛКС №2 Журко А.Н.: +375(17) 264-93-74, +375(29) 231-69-23\n▪ Рук. каб. группы Прохорчик В.Ю.: +375(17) 200-40-40, +375(29) 176-58-88\n▪️ Рук. гр. технадзора Снитко А.В.: +375(33) 347-28-85\n▪️ Рук. гр. малопарщиков Никитин Д.Д.: +375(44) 752-02-69\n▪ Рук. изм. группы Лабуза С.И.: +375(29) 701-88-29\n");
+        for (String s : dyn.getOrDefault(2, new ArrayList<>())) sb.append("▪️ ").append(s).append("\n");
+        sb.append("\n");
+
+        sb.append("💻 <b>Технический отдел</b>\n▪ Рук. гр. технадзора Шашков В.П.: +375(29) 373-35-55\n▪️ Инж. технадзора Кононова Светлана: +375(29) 577-57-46\n▪ Магистральщики (Протасевич Юлия): +375(29) 560-80-82\n▪️ Профсоюзные дела (Луговцова Оксана): +375(29) 317-19-56\n");
+        for (String s : dyn.getOrDefault(3, new ArrayList<>())) sb.append("▪️ ").append(s).append("\n");
+        sb.append("\n");
+
+        sb.append("🗂 <b>Администрация</b>\n▪️ Профком (Нестерова Е.Ю.): +375(17) 359-45-70\n▪️ Бухгалтерия по ЗП (Ромашко Ю.Г.): +375(17) 359-45-20\n▪️ Специалист по кадрам (Субач Е.В.): +375(17) 359-45-03\n");
+        for (String s : dyn.getOrDefault(4, new ArrayList<>())) sb.append("▪️ ").append(s).append("\n");
+        sb.append("\n");
+
+        sb.append("🚗 <b>АТЦ</b>\n▪️ Начальник Савицкий А.В.: +375(17) 369-05-25, +375(33) 603-32-73\n▪️ Зам. начальника Болбас Р.А.: +375(17) 369-03-93, +375(29) 840-78-37\n▪️ Инж. по БД Гузов А.П.: +375(17) 369-05-27, +375(29) 779-11-88\n");
+        for (String s : dyn.getOrDefault(5, new ArrayList<>())) sb.append("▪️ ").append(s).append("\n");
+        sb.append("\n");
+
+        sb.append("🔌 <b>Станционщики (магистраль / проключения)</b>\n▪️ Инженер Ивашкевич Дарья: +375(29) 555-38-48\n");
+        for (String s : dyn.getOrDefault(6, new ArrayList<>())) sb.append("▪️ ").append(s).append("\n");
+        sb.append("\n");
+
+        sb.append("📺 <b>Привязка СМЛ приставок</b>\n▪️ Дневное время (Ольга): +375(29) 788-84-98\n▪️ Вечернее время: +375(17) 334-56-24, +375(17) 328-46-56, +375(17) 252-44-55, +375(17) 359-41-10\n");
+        for (String s : dyn.getOrDefault(7, new ArrayList<>())) sb.append("▪️ ").append(s).append("\n");
+        sb.append("\n");
+
+        sb.append("🎧 <b>Диспетчера и админы (закрытие заявок)</b>\n▪ Диспетчеры ЦАБР: +375(17) 288-47-10\n▪️ Инженер ЦАБР: +375(17) 268-46-26\n▪ Админы: +375(17) 306-29-56, +375(33) 603-38-81\n▪ После 20:00: +375(17) 306-29-59\n▪ VPN: +375(17) 203-66-86\n");
+        for (String s : dyn.getOrDefault(8, new ArrayList<>())) sb.append("▪️ ").append(s).append("\n");
+        sb.append("\n");
+
+        sb.append("📹 <b>Прочее</b>\n▪ Видеоконтроль (Андрей): +375(17) 359-40-30\n▪️ РСМОБ: +375(17) 357-96-30\n");
+        for (String s : dyn.getOrDefault(9, new ArrayList<>())) sb.append("▪️ ").append(s).append("\n");
+
+        return sb.toString();
+    }
+
+    private void sendDirectory(long chatId, String role) {
+        String text = getDirectoryText();
+        InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
+        List<List<InlineKeyboardButton>> rows = new ArrayList<>();
+
+        rows.add(List.of(createBtn("➕ Добавить контакт", "DIR_ADD_MENU")));
+        if ("ADMIN".equals(role)) {
+            rows.add(List.of(createBtn("🗑 Удалить добавленный", "DIR_DEL_MENU")));
+        }
+        markup.setKeyboard(rows);
+        SendMessage msg = new SendMessage(String.valueOf(chatId), text);
+        msg.setParseMode("HTML"); msg.setReplyMarkup(markup);
+        try { execute(msg); } catch (TelegramApiException e) {}
+    }
+
+    private void sendDirectoryAddMenu(long chatId) {
+        InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
+        List<List<InlineKeyboardButton>> rows = new ArrayList<>();
+        rows.add(List.of(createBtn("🏢 Руководство ЛКЦ", "DIR_CAT:1"), createBtn("👷‍♂ ИТР УЛКС №2", "DIR_CAT:2")));
+        rows.add(List.of(createBtn("💻 Технический отдел", "DIR_CAT:3"), createBtn("🗂 Администрация", "DIR_CAT:4")));
+        rows.add(List.of(createBtn("🚗 АТЦ", "DIR_CAT:5"), createBtn("🔌 Станционщики", "DIR_CAT:6")));
+        rows.add(List.of(createBtn("📺 Привязка СМЛ приставок", "DIR_CAT:7"), createBtn("🎧 Диспетчера", "DIR_CAT:8")));
+        rows.add(List.of(createBtn("📹 Прочее", "DIR_CAT:9")));
+        rows.add(List.of(createBtn("🔙 Назад к справочнику", "DIR_BACK")));
+        markup.setKeyboard(rows);
+        SendMessage msg = new SendMessage(String.valueOf(chatId), "➕ <b>В какой раздел добавить контакт?</b>\nВыберите категорию ниже:");
+        msg.setParseMode("HTML"); msg.setReplyMarkup(markup);
+        try { execute(msg); } catch (TelegramApiException e) {}
+    }
+
+    private void sendDirectoryDelMenu(long chatId) {
+        List<String[]> contacts = DatabaseManager.getDynamicContactsList();
+        if (contacts.isEmpty()) {
+            sendMenu(chatId, "ADMIN", "ℹ️ В справочник еще не добавлено ни одного стороннего контакта.");
+            return;
+        }
+        InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
+        List<List<InlineKeyboardButton>> rows = new ArrayList<>();
+        for (String[] c : contacts) {
+            String shortText = c[1].length() > 30 ? c[1].substring(0, 30) + "…" : c[1];
+            rows.add(List.of(createBtn("🗑 " + shortText, "DIR_DEL:" + c[0])));
+        }
+        rows.add(List.of(createBtn("🔙 Назад к справочнику", "DIR_BACK")));
+        markup.setKeyboard(rows);
+        SendMessage msg = new SendMessage(String.valueOf(chatId), "🗑 <b>Удаление контакта</b>\nНажмите на контакт, который хотите удалить из базы:");
+        msg.setParseMode("HTML"); msg.setReplyMarkup(markup);
+        try { execute(msg); } catch (TelegramApiException e) {}
     }
 
     private void notifyAdminsForAction(long excludeChatId, String text) {
@@ -1661,7 +1937,6 @@ public class WarehouseBot extends TelegramLongPollingBot {
             keyboard.add(adminRow1);
 
             KeyboardRow adminRow2 = new KeyboardRow();
-            adminRow2.add("🔍 Аудит остатков");
             adminRow2.add("📑 Скачать отчет за месяц");
             adminRow2.add("📊 Статистика ОРШ");
             keyboard.add(adminRow2);
@@ -1800,11 +2075,60 @@ public class WarehouseBot extends TelegramLongPollingBot {
         rows.add(List.of(createBtn("🤝 Выдать мастеру", "TOOL_MENU_ASSIGN")));
         rows.add(List.of(createBtn("↩️ Забрать на склад", "TOOL_MENU_RETURN")));
         rows.add(List.of(createBtn("🗑 Списать (поломка)", "TOOL_MENU_WRITEOFF")));
-        rows.add(List.of(createBtn("📊 Сводка (Аудит)", "TOOL_MENU_AUDIT")));
+        rows.add(List.of(createBtn("📊 Общая сводка", "TOOL_MENU_AUDIT_ALL")));
+        rows.add(List.of(createBtn("👤 Сводка по людям", "TOOL_MENU_AUDIT_USERS")));
+        rows.add(List.of(createBtn("📢 Рассылка: Аудит остатков", "TOOL_MENU_AUDIT_NOTIFY")));
         rows.add(List.of(createBtn("🗄 Архив списанного", "TOOL_MENU_ARCHIVE")));
         rows.add(List.of(createBtn("♻️ Восстановить из архива", "TOOL_MENU_RESTORE")));
         markup.setKeyboard(rows);
         SendMessage msg = new SendMessage(String.valueOf(chatId), "🛠 <b>УПРАВЛЕНИЕ ИНСТРУМЕНТОМ</b>\nВыберите действие:");
+        msg.setParseMode("HTML"); msg.setReplyMarkup(markup);
+        try { execute(msg); } catch (TelegramApiException e) {}
+    }
+
+    private void sendUsersToolSummaryMenu(long chatId) {
+        List<String[]> users = DatabaseManager.getUsersWithToolCounts();
+        if (users.isEmpty()) {
+            sendMenu(chatId, "ADMIN", "ℹ️ Сейчас ни у кого из сотрудников нет инструмента на руках.");
+            return;
+        }
+        InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
+        List<List<InlineKeyboardButton>> rows = new ArrayList<>();
+        for (String[] u : users) {
+            String btnText = String.format("👤 %s (%s шт.)", u[1], u[2]);
+            rows.add(List.of(createBtn(btnText, "T_SUMM_U:" + u[0])));
+        }
+        rows.add(List.of(createBtn("🔙 Назад в меню управления", "TOOL_MAIN_MENU")));
+        markup.setKeyboard(rows);
+        SendMessage msg = new SendMessage(String.valueOf(chatId), "👤 <b>Сводка по людям</b>\nВыберите сотрудника, чтобы просмотреть и управлять его инструментом:");
+        msg.setParseMode("HTML"); msg.setReplyMarkup(markup);
+        try { execute(msg); } catch (TelegramApiException e) {}
+    }
+
+    private void sendUserToolSummary(long chatId, long targetUserId) {
+        List<String[]> tools = DatabaseManager.getUserAssignedToolsForReturn(targetUserId);
+        String userName = DatabaseManager.getUserFullName(targetUserId);
+
+        if (tools.isEmpty()) {
+            sendMenu(chatId, "ADMIN", "ℹ️ У сотрудника <b>" + userName + "</b> больше нет инструмента на руках.");
+            sendUsersToolSummaryMenu(chatId); // Автоматически возвращаем к списку людей
+            return;
+        }
+
+        InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
+        List<List<InlineKeyboardButton>> rows = new ArrayList<>();
+        for (String[] t : tools) {
+            String inv = (t[2] != null && !t[2].isEmpty() && !t[2].equals("null")) ? " [" + t[2] + "]" : "";
+            // Обрезаем длинные названия, чтобы влезли в кнопку
+            String btnText = String.format("↩️ Забрать: %s%s", t[1].length() > 15 ? t[1].substring(0, 15) + "…" : t[1], inv);
+            rows.add(List.of(createBtn(btnText, "T_SUMM_RET:" + t[0] + ":" + targetUserId)));
+        }
+
+        rows.add(List.of(createBtn("🚨 Вернуть ВСЁ на склад", "T_SUMM_RALL:" + targetUserId)));
+        rows.add(List.of(createBtn("🔙 Назад к списку людей", "TOOL_MENU_AUDIT_USERS")));
+
+        markup.setKeyboard(rows);
+        SendMessage msg = new SendMessage(String.valueOf(chatId), "👤 <b>Инструмент: " + userName + "</b>\n\nНажмите на кнопку, чтобы вернуть конкретный прибор на склад, или заберите всё разом:");
         msg.setParseMode("HTML"); msg.setReplyMarkup(markup);
         try { execute(msg); } catch (TelegramApiException e) {}
     }
@@ -1987,10 +2311,28 @@ public class WarehouseBot extends TelegramLongPollingBot {
         row1.add("🗓 Мой график");
         row1.add("🤝 С кем я в смене?");
         KeyboardRow row2 = new KeyboardRow();
+        row2.add("👁 График коллеги");
         row2.add("🔙 Назад");
         markup.setKeyboard(List.of(row1, row2));
         message.setReplyMarkup(markup);
         try { execute(message); } catch (TelegramApiException e) {}
+    }
+
+    private void sendColleagueSelectionMenu(long chatId, List<String> names) {
+        InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
+        List<List<InlineKeyboardButton>> rows = new ArrayList<>();
+
+        for (String name : names) {
+            InlineKeyboardButton btn = new InlineKeyboardButton("👤 " + name);
+            btn.setCallbackData("VIEW_SCHED:" + name);
+            rows.add(List.of(btn));
+        }
+
+        markup.setKeyboard(rows);
+        SendMessage msg = new SendMessage(String.valueOf(chatId), "👁 <b>График коллеги</b>\n\nВыберите фамилию сотрудника из списка:");
+        msg.setParseMode("HTML");
+        msg.setReplyMarkup(markup);
+        try { execute(msg); } catch (TelegramApiException e) { e.printStackTrace(); }
     }
 
     private void sendUploadsMenu(long chatId, String text) {

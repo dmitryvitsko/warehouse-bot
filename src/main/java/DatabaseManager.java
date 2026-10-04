@@ -1,10 +1,7 @@
 import java.sql.*;
 import java.text.DecimalFormat;
 import java.text.DecimalFormatSymbols;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Locale;
-import java.util.Map;
+import java.util.*;
 
 public class DatabaseManager {
     private static final String DB_URL = "jdbc:sqlite:warehouse.db";
@@ -44,6 +41,15 @@ public class DatabaseManager {
                             role TEXT DEFAULT 'WORKER'
                         );
                     """);
+
+            stmt.execute("""
+                CREATE TABLE IF NOT EXISTS directory_contacts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    category INTEGER,
+                    contact_text TEXT,
+                    added_by INTEGER
+                );
+            """);
 
             stmt.execute("""
                         CREATE TABLE IF NOT EXISTS materials (
@@ -1131,6 +1137,17 @@ public class DatabaseManager {
         return names;
     }
 
+    // Метод для получения ВСЕХ фамилий из загруженного графика
+    public static List<String> getAllExcelNames() {
+        List<String> names = new ArrayList<>();
+        try (Connection conn = getConnection();
+             Statement stmt = conn.createStatement();
+             ResultSet rs = stmt.executeQuery("SELECT DISTINCT excel_name FROM schedules ORDER BY excel_name")) {
+            while (rs.next()) names.add(rs.getString("excel_name"));
+        } catch (SQLException e) { e.printStackTrace(); }
+        return names;
+    }
+
     public static void bindUserToExcelName(long userId, String excelName) {
         try (Connection conn = getConnection();
              PreparedStatement ps = conn.prepareStatement("INSERT INTO user_excel_names (user_id, excel_name) VALUES (?, ?) ON CONFLICT(user_id) DO UPDATE SET excel_name = excluded.excel_name")) {
@@ -1194,7 +1211,7 @@ public class DatabaseManager {
                 String dayOfWeek = getDayOfWeekRu(year, monthNum, dayNum);
 
                 if (!hasData) {
-                    sb.append(String.format("🗓 <b>Ваш график на %s %d г.</b>\n👤 Сотрудник: <b>%s</b>\n\n➖ <b>Неделя %d</b> ➖➖➖➖➖➖\n", monthName, year, excelName, weekNumber));
+                    sb.append(String.format("🗓 <b>График на %s %d г.</b>\n👤 Сотрудник: <b>%s</b>\n\n➖ <b>Неделя %d</b> ➖➖➖➖➖➖\n", monthName, year, excelName, weekNumber));
                     hasData = true;
                 } else if (date.getDayOfWeek() == java.time.DayOfWeek.MONDAY) {
                     weekNumber++;
@@ -1505,22 +1522,20 @@ public class DatabaseManager {
         } catch (SQLException e) { return "❌ Ошибка базы данных."; }
     }
 
-    public static boolean unbindUser(long userId) {
+    public static boolean unbindUser(long userId, String realTelegramName) {
         try (Connection conn = getConnection()) {
-            // 1. Удаляем привязку к графику
+            // 1. Удаляем привязку к графику из базы
             PreparedStatement ps1 = conn.prepareStatement("DELETE FROM user_excel_names WHERE user_id = ?");
             ps1.setLong(1, userId);
-            int rows = ps1.executeUpdate();
+            ps1.executeUpdate();
 
-            // 2. Откатываем имя в основной таблице до базового "Сотрудник",
-            // чтобы путаница с "Белевичами" сразу исчезла
-            if (rows > 0) {
-                PreparedStatement ps2 = conn.prepareStatement("UPDATE users SET full_name = ? WHERE id = ?");
-                ps2.setString(1, "Отвязанный Сотрудник " + userId);
-                ps2.setLong(2, userId);
-                ps2.executeUpdate();
-                return true;
-            }
+            // 2. Обновляем имя, устанавливая реальное имя из Телеграма с пометкой
+            PreparedStatement ps2 = conn.prepareStatement("UPDATE users SET full_name = ? WHERE id = ?");
+            ps2.setString(1, "[Отвязан] " + realTelegramName);
+            ps2.setLong(2, userId);
+            int updatedUsers = ps2.executeUpdate();
+
+            return updatedUsers > 0;
         } catch (SQLException e) { e.printStackTrace(); }
         return false;
     }
@@ -2052,5 +2067,91 @@ public class DatabaseManager {
             }
         } catch (SQLException e) { e.printStackTrace(); }
         return sb.toString();
+    }
+    // Метод: Получить список сотрудников, у которых ЕСТЬ инструмент (с подсчетом количества)
+    public static List<String[]> getUsersWithToolCounts() {
+        List<String[]> list = new ArrayList<>();
+        String sql = "SELECT u.id, u.full_name, COUNT(t.id) as t_count " +
+                "FROM tools t JOIN users u ON t.assigned_to = u.id " +
+                "WHERE t.status = 'ASSIGNED' " +
+                "GROUP BY u.id, u.full_name " +
+                "ORDER BY u.full_name";
+        try (Connection conn = getConnection(); Statement stmt = conn.createStatement(); ResultSet rs = stmt.executeQuery(sql)) {
+            while (rs.next()) {
+                list.add(new String[]{
+                        String.valueOf(rs.getLong("id")),
+                        rs.getString("full_name"),
+                        String.valueOf(rs.getInt("t_count"))
+                });
+            }
+        } catch (SQLException e) { e.printStackTrace(); }
+        return list;
+    }
+
+    // Метод: Изъять ВЕСЬ инструмент у конкретного сотрудника (Магическая кнопка)
+    public static String returnAllUserToolsToWarehouse(long userId) {
+        try (Connection conn = getConnection()) {
+            PreparedStatement psName = conn.prepareStatement("SELECT full_name FROM users WHERE id = ?");
+            psName.setLong(1, userId);
+            ResultSet rsName = psName.executeQuery();
+            String userName = rsName.next() ? rsName.getString("full_name") : "Неизвестный сотрудник";
+
+            PreparedStatement psUpdate = conn.prepareStatement("UPDATE tools SET status = 'IN_STOCK', assigned_to = NULL WHERE assigned_to = ? AND status = 'ASSIGNED'");
+            psUpdate.setLong(1, userId);
+            int count = psUpdate.executeUpdate();
+
+            if (count > 0) {
+                return "✅ <b>Успешно!</b>\nВсе инструменты (<b>" + count + " шт.</b>) списаны с сотрудника <b>" + userName + "</b> и возвращены на склад.";
+            } else {
+                return "ℹ️ У данного сотрудника нет инструмента для возврата.";
+            }
+        } catch (SQLException e) {
+            e.printStackTrace();
+            return "❌ Ошибка базы данных при массовом возврате инструмента.";
+        }
+    }
+
+    // --- ЖИВОЙ СПРАВОЧНИК ---
+
+    // Получить все добавленные контакты, сгруппированные по категориям
+    public static Map<Integer, List<String>> getDynamicContacts() {
+        Map<Integer, List<String>> map = new HashMap<>();
+        try (Connection conn = getConnection(); Statement stmt = conn.createStatement();
+             ResultSet rs = stmt.executeQuery("SELECT category, contact_text FROM directory_contacts ORDER BY id")) {
+            while (rs.next()) {
+                map.computeIfAbsent(rs.getInt("category"), k -> new ArrayList<>()).add(rs.getString("contact_text"));
+            }
+        } catch (SQLException e) { e.printStackTrace(); }
+        return map;
+    }
+
+    // Сохранить новый контакт
+    public static boolean addDirectoryContact(int category, String text, long userId) {
+        try (Connection conn = getConnection(); PreparedStatement ps = conn.prepareStatement("INSERT INTO directory_contacts (category, contact_text, added_by) VALUES (?, ?, ?)")) {
+            ps.setInt(1, category);
+            ps.setString(2, text);
+            ps.setLong(3, userId);
+            return ps.executeUpdate() > 0;
+        } catch (SQLException e) { e.printStackTrace(); return false; }
+    }
+
+    // Получить список контактов для админского удаления
+    public static List<String[]> getDynamicContactsList() {
+        List<String[]> list = new ArrayList<>();
+        try (Connection conn = getConnection(); Statement stmt = conn.createStatement();
+             ResultSet rs = stmt.executeQuery("SELECT id, contact_text FROM directory_contacts ORDER BY id")) {
+            while (rs.next()) {
+                list.add(new String[]{String.valueOf(rs.getInt("id")), rs.getString("contact_text")});
+            }
+        } catch (SQLException e) { e.printStackTrace(); }
+        return list;
+    }
+
+    // Удалить контакт
+    public static void deleteDirectoryContact(int id) {
+        try (Connection conn = getConnection(); PreparedStatement ps = conn.prepareStatement("DELETE FROM directory_contacts WHERE id = ?")) {
+            ps.setInt(1, id);
+            ps.executeUpdate();
+        } catch (SQLException e) { e.printStackTrace(); }
     }
 }

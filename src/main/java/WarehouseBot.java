@@ -35,6 +35,8 @@ public class WarehouseBot extends TelegramLongPollingBot {
     private final Map<Long, Integer> waitingDirContactCat = new HashMap<>();
     private final Map<Long, Boolean> waitingNewEmployeeName = new ConcurrentHashMap<>();
     private final Map<Long, Boolean> waitingSickLeaveDate = new ConcurrentHashMap<>();
+    private final Map<Long, String> tmAuthStep = new HashMap<>();   // WAIT_LOGIN / WAIT_PASSWORD
+    private final Map<Long, String> tmTempLogin = new HashMap<>();  // временно храним логин, пока ждём пароль
 
     // Для карманного редактора смен
     private final Map<Long, String> waitingScheduleEditUser = new HashMap<>();
@@ -1088,6 +1090,26 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 sendMenu(chatId, role, "⚠️ Причина зафиксирована. Этот ОРШ переведен в статус проблемных."); return;
             }
 
+            if ("WAIT_LOGIN".equals(tmAuthStep.get(chatId))) {
+                tmTempLogin.put(chatId, text.trim());
+                tmAuthStep.put(chatId, "WAIT_PASSWORD");
+                sendCancelKeyboard(chatId, "🔑 Теперь введите пароль от ТМ:");
+                return;
+            }
+            if ("WAIT_PASSWORD".equals(tmAuthStep.get(chatId))) {
+                tmAuthStep.remove(chatId);
+                String login = tmTempLogin.remove(chatId);
+                String session = TmClient.login(login, text.trim());
+                if (session == null) {
+                    sendMenu(chatId, role, "❌ Неверный логин или пароль ТМ. Нажмите «🛠 Мои заявки (ТМ)», чтобы попробовать снова.");
+                    return;
+                }
+                DatabaseManager.saveTmCredentials(chatId, login, text.trim());
+                DatabaseManager.saveTmSession(chatId, session);
+                sendMenu(chatId, role, TmClient.formatTasksText(TmClient.getTasks(session)));
+                return;
+            }
+
             switch (text) {
                 case "/start" -> {
                     String roleTitle = role.equals("ADMIN") ? "Администратор (МОЛ)" : "Мастер ЦБР УЛКС №2 ЛКЦ";
@@ -1110,6 +1132,23 @@ public class WarehouseBot extends TelegramLongPollingBot {
                         List<String> names = DatabaseManager.getAvailableExcelNames();
                         if (names.isEmpty()) sendMenu(chatId, role, "ℹ График работ еще не загружен администратором.");
                         else sendNameBindingMenu(chatId, names);
+                    }
+                }
+                case "🛠 Мои заявки (ТМ)" -> {
+                    String session = DatabaseManager.getTmSession(chatId);
+                    if (session != null) {
+                        var tasks = TmClient.getTasks(session);
+                        if (tasks == null) { // сессия протухла — перелогиниваемся по сохранённым данным
+                            String[] creds = DatabaseManager.getTmCredentials(chatId);
+                            if (creds != null) {
+                                session = TmClient.login(creds[0], creds[1]);
+                                if (session != null) { DatabaseManager.saveTmSession(chatId, session); tasks = TmClient.getTasks(session); }
+                            }
+                        }
+                        sendMenu(chatId, role, TmClient.formatTasksText(tasks));
+                    } else {
+                        tmAuthStep.put(chatId, "WAIT_LOGIN");
+                        sendCancelKeyboard(chatId, "🔐 Введите логин от ТМ:");
                     }
                 }
                 case "➕ Добавить сотрудника" -> {
@@ -1477,11 +1516,13 @@ public class WarehouseBot extends TelegramLongPollingBot {
         KeyboardRow r3 = new KeyboardRow(); r3.add("🧾 Калькулятор квитанции"); r3.add("📋 Тарифы услуг"); keyboard.add(r3);
         KeyboardRow r4 = new KeyboardRow(); r4.add("📸 Плановый осмотр ОРШ"); r4.add("🗓 График работ"); keyboard.add(r4);
         KeyboardRow r5 = new KeyboardRow(); r5.add("🔢 Коды закрытия"); r5.add("📞 Справочник"); keyboard.add(r5);
+
         if ("ADMIN".equals(role)) {
             KeyboardRow a1 = new KeyboardRow(); a1.add("📊 У кого что на руках"); a1.add("🛠 Управление инструментом"); keyboard.add(a1);
             KeyboardRow a2 = new KeyboardRow(); a2.add("📑 Скачать отчет за месяц"); a2.add("📊 Статистика ОРШ"); keyboard.add(a2);
             KeyboardRow a3 = new KeyboardRow(); a3.add("📢 Сделать рассылку"); a3.add("👥 Пользователи"); keyboard.add(a3);
             KeyboardRow a4 = new KeyboardRow(); a4.add("📥 Загрузки (Excel)"); keyboard.add(a4);
+            KeyboardRow a5 = new KeyboardRow(); a5.add("🛠 Мои заявки (ТМ)"); keyboard.add(a5);
         }
         keyboardMarkup.setKeyboard(keyboard);
         try {

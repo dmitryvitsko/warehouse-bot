@@ -46,13 +46,22 @@ public class DatabaseManager {
                     """);
 
             stmt.execute("""
-                CREATE TABLE IF NOT EXISTS directory_contacts (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    category INTEGER,
-                    contact_text TEXT,
-                    added_by INTEGER
-                );
-            """);
+    CREATE TABLE IF NOT EXISTS tm_accounts (
+        chat_id INTEGER PRIMARY KEY,
+        username TEXT NOT NULL,
+        password TEXT NOT NULL,
+        session TEXT
+    );
+""");
+
+            stmt.execute("""
+                        CREATE TABLE IF NOT EXISTS directory_contacts (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            category INTEGER,
+                            contact_text TEXT,
+                            added_by INTEGER
+                        );
+                    """);
 
             stmt.execute("""
                         CREATE TABLE IF NOT EXISTS materials (
@@ -78,7 +87,8 @@ public class DatabaseManager {
                 stmt.execute("ALTER TABLE materials ADD COLUMN original_unit TEXT DEFAULT 'шт';");
                 stmt.execute("ALTER TABLE materials ADD COLUMN work_unit TEXT DEFAULT 'шт';");
                 stmt.execute("ALTER TABLE materials ADD COLUMN conv_factor REAL DEFAULT 1.0;");
-            } catch (SQLException ignored) {}
+            } catch (SQLException ignored) {
+            }
 
             stmt.execute("""
                         CREATE TABLE IF NOT EXISTS employee_balances (
@@ -119,8 +129,14 @@ public class DatabaseManager {
                         );
                     """);
 
-            try { stmt.execute("ALTER TABLE transactions ADD COLUMN phone_number TEXT;"); } catch (SQLException ignored) {}
-            try { stmt.execute("ALTER TABLE transactions ADD COLUMN closing_code TEXT;"); } catch (SQLException ignored) {}
+            try {
+                stmt.execute("ALTER TABLE transactions ADD COLUMN phone_number TEXT;");
+            } catch (SQLException ignored) {
+            }
+            try {
+                stmt.execute("ALTER TABLE transactions ADD COLUMN closing_code TEXT;");
+            } catch (SQLException ignored) {
+            }
 
             stmt.execute("""
                         CREATE TABLE IF NOT EXISTS service_tariffs (
@@ -197,68 +213,74 @@ public class DatabaseManager {
                     """);
 
             stmt.execute("""
-                CREATE TABLE IF NOT EXISTS schedules_v2 (
-                    excel_name TEXT,
-                    year INTEGER,
-                    month INTEGER,
-                    day INTEGER,
-                    status_code TEXT,
-                    start_time TEXT,
-                    end_time TEXT,
-                    UNIQUE(excel_name, year, month, day)
-                );
-            """);
+                        CREATE TABLE IF NOT EXISTS schedules_v2 (
+                            excel_name TEXT,
+                            year INTEGER,
+                            month INTEGER,
+                            day INTEGER,
+                            status_code TEXT,
+                            start_time TEXT,
+                            end_time TEXT,
+                            UNIQUE(excel_name, year, month, day)
+                        );
+                    """);
 
             stmt.execute("""
-                CREATE TABLE IF NOT EXISTS tools (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    name TEXT NOT NULL,
-                    inv_number TEXT,
-                    status TEXT DEFAULT 'IN_STOCK',
-                    assigned_to INTEGER,
-                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-                );
-            """);
+                        CREATE TABLE IF NOT EXISTS tools (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            name TEXT NOT NULL,
+                            inv_number TEXT,
+                            status TEXT DEFAULT 'IN_STOCK',
+                            assigned_to INTEGER,
+                            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                        );
+                    """);
 
-            try { stmt.execute("ALTER TABLE tools ADD COLUMN write_off_reason TEXT;"); } catch (SQLException ignored) {}
-            try { stmt.execute("ALTER TABLE tools ADD COLUMN written_off_at DATETIME;"); } catch (SQLException ignored) {}
+            try {
+                stmt.execute("ALTER TABLE tools ADD COLUMN write_off_reason TEXT;");
+            } catch (SQLException ignored) {
+            }
+            try {
+                stmt.execute("ALTER TABLE tools ADD COLUMN written_off_at DATETIME;");
+            } catch (SQLException ignored) {
+            }
 
             stmt.execute("""
-                CREATE TABLE IF NOT EXISTS orsh_inspections (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    orsh_number TEXT NOT NULL,
-                    address TEXT NOT NULL,
-                    location TEXT NOT NULL,
-                    status TEXT DEFAULT 'PENDING',
-                    reason TEXT,
-                    inspected_by TEXT,
-                    inspected_at DATETIME
-                );
-            """);
+                        CREATE TABLE IF NOT EXISTS orsh_inspections (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            orsh_number TEXT NOT NULL,
+                            address TEXT NOT NULL,
+                            location TEXT NOT NULL,
+                            status TEXT DEFAULT 'PENDING',
+                            reason TEXT,
+                            inspected_by TEXT,
+                            inspected_at DATETIME
+                        );
+                    """);
 
             // ==========================================
             // НОВЫЕ ТАБЛИЦЫ ДЛЯ СВАРОЧНЫХ АППАРАТОВ
             // ==========================================
             stmt.execute("""
-                CREATE TABLE IF NOT EXISTS welders (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    name TEXT UNIQUE,
-                    status TEXT DEFAULT 'ON_BASE',
-                    assigned_to INTEGER DEFAULT NULL,
-                    assigned_time TIMESTAMP DEFAULT NULL
-                );
-            """);
+                        CREATE TABLE IF NOT EXISTS welders (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            name TEXT UNIQUE,
+                            status TEXT DEFAULT 'ON_BASE',
+                            assigned_to INTEGER DEFAULT NULL,
+                            assigned_time TIMESTAMP DEFAULT NULL
+                        );
+                    """);
 
             stmt.execute("""
-                CREATE TABLE IF NOT EXISTS welders_history (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    welder_id INTEGER,
-                    user_id INTEGER,
-                    action TEXT,
-                    action_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    admin_id INTEGER DEFAULT NULL
-                );
-            """);
+                        CREATE TABLE IF NOT EXISTS welders_history (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            welder_id INTEGER,
+                            user_id INTEGER,
+                            action TEXT,
+                            action_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            admin_id INTEGER DEFAULT NULL
+                        );
+                    """);
 
             // Первичная загрузка списка сварочников
             String[] initialWelders = {
@@ -275,7 +297,8 @@ public class DatabaseManager {
 
             try {
                 stmt.execute("UPDATE users SET full_name = (SELECT excel_name FROM user_excel_names WHERE user_excel_names.user_id = users.id) WHERE EXISTS (SELECT 1 FROM user_excel_names WHERE user_excel_names.user_id = users.id)");
-            } catch (SQLException ignored) {}
+            } catch (SQLException ignored) {
+            }
 
             System.out.println("✅ База данных warehouse.db и все таблицы успешно готовы к работе!");
 
@@ -312,7 +335,9 @@ public class DatabaseManager {
                 psHist.executeUpdate();
                 return true;
             }
-        } catch (SQLException e) { e.printStackTrace(); }
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
         return false;
     }
 
@@ -339,7 +364,9 @@ public class DatabaseManager {
                 psHist.executeUpdate();
                 return true;
             }
-        } catch (SQLException e) { e.printStackTrace(); }
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
         return false;
     }
 
@@ -359,20 +386,22 @@ public class DatabaseManager {
                         rs.getString("assigned_to") != null ? rs.getString("assigned_to") : ""
                 });
             }
-        } catch (SQLException e) { e.printStackTrace(); }
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
         return list;
     }
 
     public static String getWeldersHistoryText() {
         StringBuilder sb = new StringBuilder("📜 <b>Журнал движений сварочных аппаратов:</b>\n<i>(последние 40 операций)</i>\n\n");
         String sql = """
-            SELECT datetime(h.action_time, 'localtime') as local_time, w.name, u.full_name, h.action, a.full_name as admin_name
-            FROM welders_history h
-            JOIN welders w ON h.welder_id = w.id
-            JOIN users u ON h.user_id = u.id
-            LEFT JOIN users a ON h.admin_id = a.id
-            ORDER BY h.action_time DESC LIMIT 40
-        """;
+                    SELECT datetime(h.action_time, 'localtime') as local_time, w.name, u.full_name, h.action, a.full_name as admin_name
+                    FROM welders_history h
+                    JOIN welders w ON h.welder_id = w.id
+                    JOIN users u ON h.user_id = u.id
+                    LEFT JOIN users a ON h.admin_id = a.id
+                    ORDER BY h.action_time DESC LIMIT 40
+                """;
         boolean hasItems = false;
         try (Connection conn = getConnection(); Statement stmt = conn.createStatement(); ResultSet rs = stmt.executeQuery(sql)) {
             while (rs.next()) {
@@ -397,7 +426,9 @@ public class DatabaseManager {
                 sb.append(String.format("%s <i>%s</i>\n<b>%s</b> — %s <b>%s</b>%s\n\n",
                         icon, time, userName, actionRu, welderName, adminSuffix));
             }
-        } catch (SQLException e) { e.printStackTrace(); }
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
         return hasItems ? sb.toString() : "📜 История пока пуста.";
     }
 
@@ -406,7 +437,9 @@ public class DatabaseManager {
             ps.setInt(1, id);
             ResultSet rs = ps.executeQuery();
             if (rs.next()) return rs.getString("name");
-        } catch (SQLException e) { e.printStackTrace(); }
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
         return "Неизвестный аппарат";
     }
 
@@ -498,7 +531,9 @@ public class DatabaseManager {
             ps.setLong(1, userId);
             ResultSet rs = ps.executeQuery();
             if (rs.next()) return rs.getString("full_name");
-        } catch (SQLException e) { e.printStackTrace(); }
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
         return tgName;
     }
 
@@ -535,7 +570,9 @@ public class DatabaseManager {
                 sb.append(String.format(" ▪ %s (<i>%s</i>) — %s\n", rs.getString("service_name"), rs.getString("unit"), priceStr));
                 rowNum++;
             }
-        } catch (SQLException e) { e.printStackTrace(); }
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
         return sb.toString();
     }
 
@@ -602,7 +639,9 @@ public class DatabaseManager {
                         rs.getString("batch_info") != null ? rs.getString("batch_info") : ""
                 });
             }
-        } catch (SQLException e) { e.printStackTrace(); }
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
         return list;
     }
 
@@ -627,7 +666,9 @@ public class DatabaseManager {
                 s.step = "WAIT_QTY";
                 return s;
             }
-        } catch (SQLException e) { e.printStackTrace(); }
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
         return null;
     }
 
@@ -714,7 +755,9 @@ public class DatabaseManager {
                         rs.getString("name"), rs.getString("code"), fmtQty(qty), rs.getString("work_unit"),
                         fmtPrice(totalSum), fmtPrice(priceVat), rs.getString("work_unit")));
             }
-        } catch (SQLException e) { e.printStackTrace(); }
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
         return hasItems ? sb.toString() : "🧰 За вами сейчас не числится материалов. Возьмите нужные позиции в разделе «📦 Склад».";
     }
 
@@ -746,7 +789,9 @@ public class DatabaseManager {
                 sb.append(String.format("   • <b>%s</b> [<code>%s</code>] — <b>%s %s</b> (сумма: <b>%s руб.</b>)\n",
                         rs.getString("name"), rs.getString("code"), fmtQty(qty), rs.getString("work_unit"), fmtPrice(totalSum)));
             }
-        } catch (SQLException e) { e.printStackTrace(); }
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
         return hasAny ? sb.toString() : "📊 Сейчас на руках у сотрудников нет ни одного материала.";
     }
 
@@ -768,7 +813,9 @@ public class DatabaseManager {
                         rs.getString("work_unit"), fmtQty(rs.getDouble("quantity"))
                 });
             }
-        } catch (SQLException e) { e.printStackTrace(); }
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
         return list;
     }
 
@@ -867,7 +914,9 @@ public class DatabaseManager {
                 String date = rs.getString("write_off_date");
                 return "\n\n⚠️ <b>ОСТОРОЖНО:</b> По этому абоненту менее 6 мес. назад уже закрывалась заявка (код " + code + " от " + date + "). <b>Вы обязаны использовать код 227 (любой другой запрещен)!</b>";
             }
-        } catch (SQLException e) { e.printStackTrace(); }
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
         return "";
     }
 
@@ -1072,7 +1121,8 @@ public class DatabaseManager {
 
             if (!rs.next()) return new String[]{"ERROR", "0", "❌ Заявка №" + requestId + " не найдена."};
             String status = rs.getString("status");
-            if (!"PENDING".equals(status)) return new String[]{"ERROR", "0", "ℹ Эта заявка (№" + requestId + ") уже обработана."};
+            if (!"PENDING".equals(status))
+                return new String[]{"ERROR", "0", "ℹ Эта заявка (№" + requestId + ") уже обработана."};
 
             long workerId = rs.getLong("user_id");
             double qty = rs.getDouble("quantity");
@@ -1101,7 +1151,9 @@ public class DatabaseManager {
              Statement stmt = conn.createStatement();
              ResultSet rs = stmt.executeQuery("SELECT id FROM users WHERE role = 'ADMIN'")) {
             while (rs.next()) admins.add(rs.getLong("id"));
-        } catch (SQLException e) { e.printStackTrace(); }
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
         return admins;
     }
 
@@ -1118,7 +1170,9 @@ public class DatabaseManager {
     public static String saveSchedule(List<ScheduleDay> days) {
         try (Connection conn = getConnection()) {
             conn.setAutoCommit(false);
-            try (Statement stmt = conn.createStatement()) { stmt.execute("DELETE FROM schedules"); }
+            try (Statement stmt = conn.createStatement()) {
+                stmt.execute("DELETE FROM schedules");
+            }
             try (PreparedStatement ps = conn.prepareStatement("INSERT INTO schedules (excel_name, month_name, year_val, day_num, start_time, end_time, status_code) VALUES (?, ?, ?, ?, ?, ?, ?)")) {
                 for (ScheduleDay d : days) {
                     ps.setString(1, d.excelName);
@@ -1144,7 +1198,9 @@ public class DatabaseManager {
         try (Connection conn = getConnection(); Statement stmt = conn.createStatement();
              ResultSet rs = stmt.executeQuery("SELECT DISTINCT excel_name FROM schedules_v2 WHERE excel_name NOT IN (SELECT excel_name FROM user_excel_names) ORDER BY excel_name")) {
             while (rs.next()) names.add(rs.getString("excel_name"));
-        } catch (SQLException e) { e.printStackTrace(); }
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
         return names;
     }
 
@@ -1154,7 +1210,9 @@ public class DatabaseManager {
         try (Connection conn = getConnection(); Statement stmt = conn.createStatement();
              ResultSet rs = stmt.executeQuery("SELECT DISTINCT excel_name FROM schedules_v2 ORDER BY excel_name")) {
             while (rs.next()) names.add(rs.getString("excel_name"));
-        } catch (SQLException e) { e.printStackTrace(); }
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
         return names;
     }
 
@@ -1169,7 +1227,9 @@ public class DatabaseManager {
                 psUpdateUser.setLong(2, userId);
                 psUpdateUser.executeUpdate();
             }
-        } catch (SQLException e) { e.printStackTrace(); }
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
     }
 
     public static String getUserExcelName(long userId) {
@@ -1178,18 +1238,26 @@ public class DatabaseManager {
             ps.setLong(1, userId);
             ResultSet rs = ps.executeQuery();
             if (rs.next()) return rs.getString("excel_name");
-        } catch (SQLException e) { e.printStackTrace(); }
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
         return null;
     }
 
     private static int getMonthNumber(String monthName) {
         String m = monthName.toUpperCase();
-        if (m.contains("ЯНВАР")) return 1; if (m.contains("ФЕВРАЛ")) return 2;
-        if (m.contains("МАРТ")) return 3; if (m.contains("АПРЕЛ")) return 4;
-        if (m.contains("МА")) return 5; if (m.contains("ИЮН")) return 6;
-        if (m.contains("ИЮЛ")) return 7; if (m.contains("АВГУСТ")) return 8;
-        if (m.contains("СЕНТЯБР")) return 9; if (m.contains("ОКТЯБР")) return 10;
-        if (m.contains("НОЯБР")) return 11; if (m.contains("ДЕКАБР")) return 12;
+        if (m.contains("ЯНВАР")) return 1;
+        if (m.contains("ФЕВРАЛ")) return 2;
+        if (m.contains("МАРТ")) return 3;
+        if (m.contains("АПРЕЛ")) return 4;
+        if (m.contains("МА")) return 5;
+        if (m.contains("ИЮН")) return 6;
+        if (m.contains("ИЮЛ")) return 7;
+        if (m.contains("АВГУСТ")) return 8;
+        if (m.contains("СЕНТЯБР")) return 9;
+        if (m.contains("ОКТЯБР")) return 10;
+        if (m.contains("НОЯБР")) return 11;
+        if (m.contains("ДЕКАБР")) return 12;
         return java.time.LocalDate.now().getMonthValue();
     }
 
@@ -1197,10 +1265,17 @@ public class DatabaseManager {
         try {
             java.time.DayOfWeek dow = java.time.LocalDate.of(year, month, day).getDayOfWeek();
             return switch (dow) {
-                case MONDAY -> "Пн"; case TUESDAY -> "Вт"; case WEDNESDAY -> "Ср";
-                case THURSDAY -> "Чт"; case FRIDAY -> "Пт"; case SATURDAY -> "Сб"; case SUNDAY -> "Вс";
+                case MONDAY -> "Пн";
+                case TUESDAY -> "Вт";
+                case WEDNESDAY -> "Ср";
+                case THURSDAY -> "Чт";
+                case FRIDAY -> "Пт";
+                case SATURDAY -> "Сб";
+                case SUNDAY -> "Вс";
             };
-        } catch (Exception e) { return ""; }
+        } catch (Exception e) {
+            return "";
+        }
     }
 
     public static String getFormattedSchedule(String excelName, int year, int month) {
@@ -1252,7 +1327,8 @@ public class DatabaseManager {
                     line = String.format("🏢 <b>%s, %02d</b> — Др. подразделение", dayOfWeek, dayNum);
                 } else {
                     String icon = "🟩";
-                    if (start != null && (start.startsWith("11:") || start.startsWith("12:") || start.startsWith("13:") || start.startsWith("14:"))) icon = "🟧";
+                    if (start != null && (start.startsWith("11:") || start.startsWith("12:") || start.startsWith("13:") || start.startsWith("14:")))
+                        icon = "🟧";
 
                     if (date.getDayOfWeek() == java.time.DayOfWeek.SATURDAY) {
                         line = String.format("🟥 <u><b>%s, %02d</b></u> — %s ❗️ <b>РАБОЧАЯ СУББОТА</b>", dayOfWeek, dayNum, timeRange);
@@ -1264,7 +1340,8 @@ public class DatabaseManager {
                 }
                 sb.append(line).append("\n");
             }
-            if (!hasData) return "ℹ️ График для сотрудника <b>" + excelName + "</b> на " + mName + " " + year + " г. не найден в базе.";
+            if (!hasData)
+                return "ℹ️ График для сотрудника <b>" + excelName + "</b> на " + mName + " " + year + " г. не найден в базе.";
         } catch (SQLException e) {
             e.printStackTrace();
             return "❌ Ошибка при чтении графика из базы данных.";
@@ -1299,7 +1376,8 @@ public class DatabaseManager {
                     boolean isSecondShift = false;
 
                     if (end != null && (end.contains("21:00") || end.contains("21.00"))) isSecondShift = true;
-                    else if (start != null && (start.startsWith("11:") || start.startsWith("12:") || start.startsWith("13:") || start.startsWith("14:"))) isSecondShift = true;
+                    else if (start != null && (start.startsWith("11:") || start.startsWith("12:") || start.startsWith("13:") || start.startsWith("14:")))
+                        isSecondShift = true;
 
                     if (isSaturday || isSecondShift) {
                         foundAny = true;
@@ -1317,10 +1395,13 @@ public class DatabaseManager {
                                 String pEnd = rsAll.getString("end_time");
 
                                 boolean partnerIsSecondShift = false;
-                                if (pEnd != null && (pEnd.contains("21:00") || pEnd.contains("21.00"))) partnerIsSecondShift = true;
-                                else if (pStart != null && (pStart.startsWith("11:") || pStart.startsWith("12:") || pStart.startsWith("13:") || pStart.startsWith("14:"))) partnerIsSecondShift = true;
+                                if (pEnd != null && (pEnd.contains("21:00") || pEnd.contains("21.00")))
+                                    partnerIsSecondShift = true;
+                                else if (pStart != null && (pStart.startsWith("11:") || pStart.startsWith("12:") || pStart.startsWith("13:") || pStart.startsWith("14:")))
+                                    partnerIsSecondShift = true;
 
-                                if (isSaturday || (isSecondShift && partnerIsSecondShift)) allWorkersThisShift.add(pName);
+                                if (isSaturday || (isSecondShift && partnerIsSecondShift))
+                                    allWorkersThisShift.add(pName);
                             }
                         }
 
@@ -1339,7 +1420,8 @@ public class DatabaseManager {
                                 if (getSeniorityRank(w) == minRank && minRank != 99) iAmSenior = true;
                                 continue;
                             }
-                            if (getSeniorityRank(w) == minRank && minRank != 99) leaderLines.add(" • <b>" + w + " (Старший смены)</b>");
+                            if (getSeniorityRank(w) == minRank && minRank != 99)
+                                leaderLines.add(" • <b>" + w + " (Старший смены)</b>");
                             else normalLines.add(" • " + w);
                         }
 
@@ -1462,8 +1544,11 @@ public class DatabaseManager {
     public static List<String[]> getAllServicesForReceipt() {
         List<String[]> list = new ArrayList<>();
         try (Connection conn = getConnection(); Statement stmt = conn.createStatement(); ResultSet rs = stmt.executeQuery("SELECT id, service_name, unit, price_with_vat FROM service_tariffs ORDER BY id")) {
-            while (rs.next()) list.add(new String[]{ String.valueOf(rs.getInt("id")), rs.getString("service_name"), rs.getString("unit"), String.valueOf(rs.getDouble("price_with_vat")) });
-        } catch (SQLException e) { e.printStackTrace(); }
+            while (rs.next())
+                list.add(new String[]{String.valueOf(rs.getInt("id")), rs.getString("service_name"), rs.getString("unit"), String.valueOf(rs.getDouble("price_with_vat"))});
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
         return list;
     }
 
@@ -1473,25 +1558,37 @@ public class DatabaseManager {
             ResultSet rs = ps.executeQuery();
             if (rs.next()) {
                 ReceiptItem item = new ReceiptItem();
-                item.dbId = id; item.name = rs.getString("service_name"); item.unit = rs.getString("unit");
-                item.priceWithVatPerUnit = rs.getDouble("price_with_vat"); item.isMaterial = false; item.isSingle = rs.getInt("is_single") == 1;
+                item.dbId = id;
+                item.name = rs.getString("service_name");
+                item.unit = rs.getString("unit");
+                item.priceWithVatPerUnit = rs.getDouble("price_with_vat");
+                item.isMaterial = false;
+                item.isSingle = rs.getInt("is_single") == 1;
                 return item;
             }
-        } catch (SQLException e) { e.printStackTrace(); }
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
         return null;
     }
 
     public static ReceiptItem getMaterialFromBalanceById(long userId, int materialId) {
         try (Connection conn = getConnection(); PreparedStatement ps = conn.prepareStatement("SELECT m.name, m.work_unit, m.price_with_vat FROM employee_balances b JOIN materials m ON b.material_id = m.id WHERE b.user_id = ? AND m.id = ? AND b.quantity > 0.00001")) {
-            ps.setLong(1, userId); ps.setInt(2, materialId);
+            ps.setLong(1, userId);
+            ps.setInt(2, materialId);
             ResultSet rs = ps.executeQuery();
             if (rs.next()) {
                 ReceiptItem item = new ReceiptItem();
-                item.dbId = materialId; item.name = rs.getString("name"); item.unit = rs.getString("work_unit");
-                item.priceWithVatPerUnit = rs.getDouble("price_with_vat"); item.isMaterial = true;
+                item.dbId = materialId;
+                item.name = rs.getString("name");
+                item.unit = rs.getString("work_unit");
+                item.priceWithVatPerUnit = rs.getDouble("price_with_vat");
+                item.isMaterial = true;
                 return item;
             }
-        } catch (SQLException e) { e.printStackTrace(); }
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
         return null;
     }
 
@@ -1514,7 +1611,8 @@ public class DatabaseManager {
                 hasServices = true;
                 double sumWithVat = item.quantity * item.priceWithVatPerUnit;
                 double vatSum = sumWithVat - (sumWithVat / 1.20);
-                totalServicesSum += sumWithVat; totalServicesVat += vatSum;
+                totalServicesSum += sumWithVat;
+                totalServicesVat += vatSum;
                 sb.append(String.format("🔹 %s\n ┝ %s %s  х  %.2f  =  <b>%.2f руб.</b>\n", item.name, fmtQty(item.quantity), getShortUnit(item.unit), item.priceWithVatPerUnit, sumWithVat));
             }
         }
@@ -1529,7 +1627,8 @@ public class DatabaseManager {
                 hasMaterials = true;
                 double sumWithVat = item.quantity * item.priceWithVatPerUnit;
                 double vatSum = sumWithVat - (sumWithVat / 1.20);
-                totalMaterialsSum += sumWithVat; totalMaterialsVat += vatSum;
+                totalMaterialsSum += sumWithVat;
+                totalMaterialsVat += vatSum;
                 sb.append(String.format("🔹 %s\n ┝ %s %s  х  %.2f  =  <b>%.2f руб.</b>\n", item.name, fmtQty(item.quantity), item.unit, item.priceWithVatPerUnit, sumWithVat));
             }
         }
@@ -1551,7 +1650,9 @@ public class DatabaseManager {
             while (rs.next()) {
                 list.add(new String[]{String.valueOf(rs.getLong("id")), rs.getString("full_name")});
             }
-        } catch (SQLException e) { e.printStackTrace(); }
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
         return list;
     }
 
@@ -1559,9 +1660,11 @@ public class DatabaseManager {
         List<String[]> list = new ArrayList<>();
         try (Connection conn = getConnection(); Statement stmt = conn.createStatement(); ResultSet rs = stmt.executeQuery("SELECT r.id, u.full_name, m.name, m.code, r.quantity, m.work_unit FROM return_requests r JOIN users u ON r.user_id = u.id JOIN materials m ON r.material_id = m.id WHERE r.status = 'PENDING' ORDER BY r.created_at ASC")) {
             while (rs.next()) {
-                list.add(new String[]{ String.valueOf(rs.getInt("id")), rs.getString("full_name"), rs.getString("name"), rs.getString("code"), String.valueOf(rs.getDouble("quantity")), rs.getString("work_unit") });
+                list.add(new String[]{String.valueOf(rs.getInt("id")), rs.getString("full_name"), rs.getString("name"), rs.getString("code"), String.valueOf(rs.getDouble("quantity")), rs.getString("work_unit")});
             }
-        } catch (SQLException e) { e.printStackTrace(); }
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
         return list;
     }
 
@@ -1569,7 +1672,9 @@ public class DatabaseManager {
         List<Long> users = new ArrayList<>();
         try (Connection conn = getConnection(); Statement stmt = conn.createStatement(); ResultSet rs = stmt.executeQuery("SELECT DISTINCT user_id FROM employee_balances WHERE quantity > 0.00001")) {
             while (rs.next()) users.add(rs.getLong("user_id"));
-        } catch (SQLException e) { e.printStackTrace(); }
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
         return users;
     }
 
@@ -1577,7 +1682,9 @@ public class DatabaseManager {
         List<Long> users = new ArrayList<>();
         try (Connection conn = getConnection(); Statement stmt = conn.createStatement(); ResultSet rs = stmt.executeQuery("SELECT id FROM users")) {
             while (rs.next()) users.add(rs.getLong("id"));
-        } catch (SQLException e) { e.printStackTrace(); }
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
         return users;
     }
 
@@ -1588,28 +1695,38 @@ public class DatabaseManager {
                 long id = rs.getLong("id");
                 String role = rs.getString("role");
                 String status = switch (role) {
-                    case "BANNED" -> "🚫 ЗАБЛОКИРОВАН"; case "ADMIN" -> "👑 АДМИН"; case "PENDING" -> "⏳ ОЖИДАЕТ ОДОБРЕНИЯ"; default -> "👷‍♂️ МАСТЕР";
+                    case "BANNED" -> "🚫 ЗАБЛОКИРОВАН";
+                    case "ADMIN" -> "👑 АДМИН";
+                    case "PENDING" -> "⏳ ОЖИДАЕТ ОДОБРЕНИЯ";
+                    default -> "👷‍♂️ МАСТЕР";
                 };
                 sb.append(String.format("👤 <b>%s</b>\n   ID: <code>%d</code>\n   Связь: <a href=\"tg://user?id=%d\">Написать в ЛС</a>\n   Статус: %s\n", rs.getString("full_name"), id, id, status));
-                if ("BANNED".equals(role) || "PENDING".equals(role)) sb.append(String.format("   Разблокировать/Одобрить: /unban_%d\n", id));
+                if ("BANNED".equals(role) || "PENDING".equals(role))
+                    sb.append(String.format("   Разблокировать/Одобрить: /unban_%d\n", id));
                 else if (!"ADMIN".equals(role)) {
                     sb.append(String.format("   Блокировать: /ban_%d\n", id));
                     sb.append(String.format("   Сбросить ФИО: /unbind_%d\n", id));
                 }
                 sb.append("\n");
             }
-        } catch (SQLException e) { e.printStackTrace(); }
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
         return sb.toString();
     }
 
     public static String setBanStatus(long targetUserId, boolean ban) {
         String newRole = ban ? "BANNED" : "WORKER";
         try (Connection conn = getConnection(); PreparedStatement ps = conn.prepareStatement("UPDATE users SET role = ? WHERE id = ? AND role != 'ADMIN'")) {
-            ps.setString(1, newRole); ps.setLong(2, targetUserId);
+            ps.setString(1, newRole);
+            ps.setLong(2, targetUserId);
             int updated = ps.executeUpdate();
-            if (updated > 0) return ban ? "✅ Пользователь " + targetUserId + " заблокирован. Бот больше не будет ему отвечать." : "✅ Пользователь разблокирован.";
+            if (updated > 0)
+                return ban ? "✅ Пользователь " + targetUserId + " заблокирован. Бот больше не будет ему отвечать." : "✅ Пользователь разблокирован.";
             return "❌ Пользователь не найден или это администратор (которого нельзя заблокировать).";
-        } catch (SQLException e) { return "❌ Ошибка базы данных."; }
+        } catch (SQLException e) {
+            return "❌ Ошибка базы данных.";
+        }
     }
 
     public static boolean unbindUser(long userId, String realTelegramName) {
@@ -1626,7 +1743,9 @@ public class DatabaseManager {
             int updatedUsers = ps2.executeUpdate();
 
             return updatedUsers > 0;
-        } catch (SQLException e) { e.printStackTrace(); }
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
         return false;
     }
 
@@ -1672,7 +1791,9 @@ public class DatabaseManager {
                 hasTools = true;
                 sb.append(String.format("%d. <b>%s</b> (Инв. №: <code>%s</code>)\n", counter++, rs.getString("name"), rs.getString("inv_number")));
             }
-        } catch (SQLException e) { e.printStackTrace(); }
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
         return hasTools ? sb.toString() : "🪛 За вами пока не закреплен инструмент.";
     }
 
@@ -1710,14 +1831,14 @@ public class DatabaseManager {
             }
 
             String sql = """
-                SELECT t.id as tool_id, t.name as tool_name, 
-                       u.full_name as worker_name, 
-                       t.inv_number
-                FROM tools t
-                JOIN users u ON t.assigned_to = u.id
-                WHERE t.status = 'ASSIGNED'
-                ORDER BY worker_name
-            """;
+                        SELECT t.id as tool_id, t.name as tool_name, 
+                               u.full_name as worker_name, 
+                               t.inv_number
+                        FROM tools t
+                        JOIN users u ON t.assigned_to = u.id
+                        WHERE t.status = 'ASSIGNED'
+                        ORDER BY worker_name
+                    """;
             ResultSet rsAssigned = stmt.executeQuery(sql);
 
             Map<String, List<String>> workersMap = new java.util.HashMap<>();
@@ -1776,7 +1897,9 @@ public class DatabaseManager {
             ps.setInt(1, toolId);
             ResultSet rs = ps.executeQuery();
             if (rs.next()) return rs.getString("name");
-        } catch (SQLException e) { e.printStackTrace(); }
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
         return "Неизвестный инструмент";
     }
 
@@ -1831,7 +1954,9 @@ public class DatabaseManager {
                         String.valueOf(rs.getInt("cnt"))
                 });
             }
-        } catch (SQLException e) { e.printStackTrace(); }
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
         return list;
     }
 
@@ -1851,7 +1976,9 @@ public class DatabaseManager {
                         rs.getString("role")
                 });
             }
-        } catch (SQLException e) { e.printStackTrace(); }
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
         return list;
     }
 
@@ -1894,7 +2021,9 @@ public class DatabaseManager {
                 String inv = rs.getString("inv_number");
                 return name + " (Инв. №: " + inv + ")";
             }
-        } catch (SQLException e) { e.printStackTrace(); }
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
         return "Неизвестный инструмент";
     }
 
@@ -1903,19 +2032,21 @@ public class DatabaseManager {
         try (Connection conn = getConnection();
              Statement stmt = conn.createStatement();
              ResultSet rs = stmt.executeQuery("""
-                     SELECT DISTINCT u.id, u.full_name as d_name 
-                     FROM tools t 
-                     JOIN users u ON t.assigned_to = u.id 
-                     WHERE t.status = 'ASSIGNED' 
-                     ORDER BY d_name
-                 """)) {
+                         SELECT DISTINCT u.id, u.full_name as d_name 
+                         FROM tools t 
+                         JOIN users u ON t.assigned_to = u.id 
+                         WHERE t.status = 'ASSIGNED' 
+                         ORDER BY d_name
+                     """)) {
             while (rs.next()) {
                 list.add(new String[]{
                         String.valueOf(rs.getLong("id")),
                         rs.getString("d_name")
                 });
             }
-        } catch (SQLException e) { e.printStackTrace(); }
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
         return list;
     }
 
@@ -1933,7 +2064,9 @@ public class DatabaseManager {
                         rs.getString("inv_number")
                 });
             }
-        } catch (SQLException e) { e.printStackTrace(); }
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
         return list;
     }
 
@@ -1969,10 +2102,12 @@ public class DatabaseManager {
                 ps.setString(1, rsCheck.getString("name"));
                 ResultSet rs = ps.executeQuery();
                 while (rs.next()) {
-                    list.add(new String[]{ String.valueOf(rs.getInt("id")), rs.getString("name"), rs.getString("inv_number") });
+                    list.add(new String[]{String.valueOf(rs.getInt("id")), rs.getString("name"), rs.getString("inv_number")});
                 }
             }
-        } catch (SQLException e) { e.printStackTrace(); }
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
         return list;
     }
 
@@ -2020,7 +2155,9 @@ public class DatabaseManager {
                 sb.append(String.format("%d. <b>%s</b>\n   • Инв. №: <code>%s</code>\n   • Дата списания: <b>%s</b>\n   • Причина: <i>%s</i>\n\n",
                         counter++, rs.getString("name"), rs.getString("inv_number"), date, reason));
             }
-        } catch (SQLException e) { e.printStackTrace(); }
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
 
         return hasItems ? sb.toString() : "🗄 В архиве списанного инструмента пока пусто.";
     }
@@ -2038,7 +2175,9 @@ public class DatabaseManager {
                         rs.getString("inv_number")
                 });
             }
-        } catch (SQLException e) { e.printStackTrace(); }
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
         return list;
     }
 
@@ -2100,9 +2239,11 @@ public class DatabaseManager {
              Statement stmt = conn.createStatement();
              ResultSet rs = stmt.executeQuery("SELECT id, orsh_number, address FROM orsh_inspections WHERE status = 'PENDING' ORDER BY id")) {
             while (rs.next()) {
-                list.add(new String[]{ rs.getString("id"), rs.getString("orsh_number"), rs.getString("address") });
+                list.add(new String[]{rs.getString("id"), rs.getString("orsh_number"), rs.getString("address")});
             }
-        } catch (SQLException e) { e.printStackTrace(); }
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
         return list;
     }
 
@@ -2112,9 +2253,11 @@ public class DatabaseManager {
             ps.setInt(1, id);
             ResultSet rs = ps.executeQuery();
             if (rs.next()) {
-                return new String[]{ rs.getString("orsh_number"), rs.getString("address"), rs.getString("location") };
+                return new String[]{rs.getString("orsh_number"), rs.getString("address"), rs.getString("location")};
             }
-        } catch (SQLException e) { e.printStackTrace(); }
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
         return null;
     }
 
@@ -2128,7 +2271,9 @@ public class DatabaseManager {
             ps.setString(3, workerName);
             ps.setInt(4, id);
             ps.executeUpdate();
-        } catch (SQLException e) { e.printStackTrace(); }
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
     }
 
     public static String getOrshStatistics() {
@@ -2155,9 +2300,12 @@ public class DatabaseManager {
                     sb.append(String.format("• <b>%s</b> — %s <i>(%s)</i>\n", rp.getString("orsh_number"), rp.getString("reason"), rp.getString("inspected_by")));
                 }
             }
-        } catch (SQLException e) { e.printStackTrace(); }
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
         return sb.toString();
     }
+
     // Метод: Получить список сотрудников, у которых ЕСТЬ инструмент (с подсчетом количества)
     public static List<String[]> getUsersWithToolCounts() {
         List<String[]> list = new ArrayList<>();
@@ -2174,7 +2322,9 @@ public class DatabaseManager {
                         String.valueOf(rs.getInt("t_count"))
                 });
             }
-        } catch (SQLException e) { e.printStackTrace(); }
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
         return list;
     }
 
@@ -2211,7 +2361,9 @@ public class DatabaseManager {
             while (rs.next()) {
                 map.computeIfAbsent(rs.getInt("category"), k -> new ArrayList<>()).add(rs.getString("contact_text"));
             }
-        } catch (SQLException e) { e.printStackTrace(); }
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
         return map;
     }
 
@@ -2222,7 +2374,10 @@ public class DatabaseManager {
             ps.setString(2, text);
             ps.setLong(3, userId);
             return ps.executeUpdate() > 0;
-        } catch (SQLException e) { e.printStackTrace(); return false; }
+        } catch (SQLException e) {
+            e.printStackTrace();
+            return false;
+        }
     }
 
     // Получить список контактов для админского удаления
@@ -2233,7 +2388,9 @@ public class DatabaseManager {
             while (rs.next()) {
                 list.add(new String[]{String.valueOf(rs.getInt("id")), rs.getString("contact_text")});
             }
-        } catch (SQLException e) { e.printStackTrace(); }
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
         return list;
     }
 
@@ -2242,8 +2399,11 @@ public class DatabaseManager {
         try (Connection conn = getConnection(); PreparedStatement ps = conn.prepareStatement("DELETE FROM directory_contacts WHERE id = ?")) {
             ps.setInt(1, id);
             ps.executeUpdate();
-        } catch (SQLException e) { e.printStackTrace(); }
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
     }
+
     // Метод для "Карманного редактора" (точечное изменение одной смены)
     public static String updateSingleShift(String excelName, int year, int month, int day, String statusCode, String startTime, String endTime) {
         try (Connection conn = getConnection();
@@ -2271,9 +2431,12 @@ public class DatabaseManager {
             ps.setString(1, excelName);
             ResultSet rs = ps.executeQuery();
             if (rs.next()) return rs.getLong("user_id");
-        } catch (SQLException e) { e.printStackTrace(); }
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
         return null;
     }
+
     // Метод: Утренняя сводка (Кто сегодня работает?)
     // Метод: Утренняя сводка (Кто сегодня работает?)
     public static String getTodayRoster() {
@@ -2328,7 +2491,8 @@ public class DatabaseManager {
                     // Определяем смену по времени
                     boolean isSecond = false;
                     if (end != null && (end.contains("21:00") || end.contains("21.00"))) isSecond = true;
-                    else if (start != null && (start.startsWith("11:") || start.startsWith("12:") || start.startsWith("13:") || start.startsWith("14:"))) isSecond = true;
+                    else if (start != null && (start.startsWith("11:") || start.startsWith("12:") || start.startsWith("13:") || start.startsWith("14:")))
+                        isSecond = true;
 
                     String timeStr = (start != null && end != null && !start.isEmpty() && !end.isEmpty()) ? " (" + start + " - " + end + ")" : "";
 
@@ -2366,6 +2530,7 @@ public class DatabaseManager {
 
         return sb.toString().trim();
     }
+
     // Метод: Полное удаление сотрудника из графиков (увольнение / армия) с игнорированием регистра
     public static String removeWorkerFromSchedule(String inputName) {
         String exactName = null;
@@ -2405,6 +2570,7 @@ public class DatabaseManager {
             return "❌ Ошибка базы данных при удалении сотрудника: " + e.getMessage();
         }
     }
+
     // Метод: Ручное добавление нового сотрудника в базу
     public static String addNewEmployeeToSchedule(String excelName) {
         java.time.LocalDate today = java.time.LocalDate.now();
@@ -2442,5 +2608,42 @@ public class DatabaseManager {
             e.printStackTrace();
             return "❌ Ошибка базы данных при добавлении сотрудника.";
         }
+    }
+    public static void saveTmCredentials(long chatId, String username, String password) {
+        try (Connection conn = getConnection();
+             PreparedStatement ps = conn.prepareStatement(
+                     "INSERT INTO tm_accounts (chat_id, username, password) VALUES (?, ?, ?) " +
+                             "ON CONFLICT(chat_id) DO UPDATE SET username = excluded.username, password = excluded.password")) {
+            ps.setLong(1, chatId); ps.setString(2, username); ps.setString(3, password);
+            ps.executeUpdate();
+        } catch (SQLException e) { e.printStackTrace(); }
+    }
+
+    public static String[] getTmCredentials(long chatId) {
+        try (Connection conn = getConnection();
+             PreparedStatement ps = conn.prepareStatement("SELECT username, password FROM tm_accounts WHERE chat_id = ?")) {
+            ps.setLong(1, chatId);
+            ResultSet rs = ps.executeQuery();
+            if (rs.next()) return new String[]{rs.getString("username"), rs.getString("password")};
+        } catch (SQLException e) { e.printStackTrace(); }
+        return null;
+    }
+
+    public static void saveTmSession(long chatId, String session) {
+        try (Connection conn = getConnection();
+             PreparedStatement ps = conn.prepareStatement("UPDATE tm_accounts SET session = ? WHERE chat_id = ?")) {
+            ps.setString(1, session); ps.setLong(2, chatId);
+            ps.executeUpdate();
+        } catch (SQLException e) { e.printStackTrace(); }
+    }
+
+    public static String getTmSession(long chatId) {
+        try (Connection conn = getConnection();
+             PreparedStatement ps = conn.prepareStatement("SELECT session FROM tm_accounts WHERE chat_id = ?")) {
+            ps.setLong(1, chatId);
+            ResultSet rs = ps.executeQuery();
+            if (rs.next()) return rs.getString("session");
+        } catch (SQLException e) { e.printStackTrace(); }
+        return null;
     }
 }

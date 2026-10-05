@@ -117,39 +117,30 @@ public class ExcelImporter {
         }
     }
 
-    public static String importScheduleSheet(File file) {
+    // --- НОВЫЙ ИМПОРТ ГРАФИКА ДЛЯ УМНОГО КАЛЕНДАРЯ ---
+    public static List<DatabaseManager.ScheduleDayV2> parseScheduleSheet(File file) throws Exception {
         try (FileInputStream fis = new FileInputStream(file);
              Workbook workbook = WorkbookFactory.create(fis)) {
 
             Sheet sheet = workbook.getSheetAt(0);
             int startRow = -1;
-            String monthName = "Месяц";
-            int yearVal = java.time.LocalDate.now().getYear();
 
-            // Ищем заголовок "ФИО" и попутно вытаскиваем месяц и год из шапки таблицы
+            // Ищем заголовок "ФИО" (месяц и год нас больше не интересуют, мы спросим их у админа)
             for (int i = 0; i < Math.min(30, sheet.getLastRowNum()); i++) {
                 Row r = sheet.getRow(i);
                 if (r == null) continue;
                 for (Cell c : r) {
-                    String txt = getCellString(c).toUpperCase();
-                    if (txt.contains(" (МЕСЯЦ)")) {
-                        monthName = txt.replace(" (МЕСЯЦ)", "").trim();
-                    }
-                    if (txt.contains("202")) {
-                        java.util.regex.Matcher m = java.util.regex.Pattern.compile("202\\d").matcher(txt);
-                        if (m.find()) {
-                            yearVal = Integer.parseInt(m.group());
-                        }
-                    }
-                    if (txt.contains("ФИО")) {
+                    if (getCellString(c).toUpperCase().contains("ФИО")) {
                         startRow = i + 1;
+                        break;
                     }
                 }
+                if (startRow != -1) break;
             }
 
-            if (startRow == -1) return "❌ Не удалось найти заголовок таблицы с 'ФИО'. Убедитесь, что это файл графика.";
+            if (startRow == -1) throw new Exception("Не удалось найти заголовок таблицы с 'ФИО'.");
 
-            List<DatabaseManager.ScheduleDay> allDays = new ArrayList<>();
+            List<DatabaseManager.ScheduleDayV2> allDays = new ArrayList<>();
 
             for (int i = startRow; i <= sheet.getLastRowNum(); i++) {
                 Row r = sheet.getRow(i);
@@ -170,10 +161,8 @@ public class ExcelImporter {
 
                         if (startStr.isEmpty() && endStr.isEmpty()) continue;
 
-                        DatabaseManager.ScheduleDay sd = new DatabaseManager.ScheduleDay();
+                        DatabaseManager.ScheduleDayV2 sd = new DatabaseManager.ScheduleDayV2();
                         sd.excelName = name;
-                        sd.monthName = monthName;
-                        sd.yearVal = yearVal;
                         sd.dayNum = day;
                         sd.statusCode = "";
                         sd.startTime = "";
@@ -195,14 +184,11 @@ public class ExcelImporter {
                 }
             }
 
-            if (allDays.isEmpty()) return "❌ Не найдено расписание сотрудников. Проверьте формат файла.";
-            return DatabaseManager.saveSchedule(allDays);
-
-        } catch (Exception e) {
-            e.printStackTrace();
-            return "❌ Ошибка при чтении графика: " + e.getMessage();
+            if (allDays.isEmpty()) throw new Exception("Не найдено расписание сотрудников.");
+            return allDays;
         }
     }
+    // ------------------------------------------------
 
     private static boolean isNumericCell(Cell cell) {
         if (cell == null) return false;
@@ -263,37 +249,33 @@ public class ExcelImporter {
         }
         return "";
     }
+
     public static String importToolsSheet(File file) {
         List<DatabaseManager.ParsedTool> tools = new ArrayList<>();
         try (FileInputStream fis = new FileInputStream(file);
              org.apache.poi.ss.usermodel.Workbook workbook = org.apache.poi.ss.usermodel.WorkbookFactory.create(fis)) {
 
-            // Берем первый лист
             org.apache.poi.ss.usermodel.Sheet sheet = workbook.getSheetAt(0);
 
             for (org.apache.poi.ss.usermodel.Row row : sheet) {
-                if (row.getRowNum() == 0) continue; // Пропускаем строку с заголовками
+                if (row.getRowNum() == 0) continue;
 
-                // Колонка B (индекс 1) - Название инструмента
                 org.apache.poi.ss.usermodel.Cell nameCell = row.getCell(1);
                 if (nameCell == null || nameCell.getCellType() == org.apache.poi.ss.usermodel.CellType.BLANK) continue;
                 String name = nameCell.getStringCellValue().trim();
 
-                // Колонка A (индекс 0) - Инвентарный номер
                 org.apache.poi.ss.usermodel.Cell invCell = row.getCell(0);
                 String invNumber = "";
                 if (invCell != null) {
                     if (invCell.getCellType() == org.apache.poi.ss.usermodel.CellType.STRING) {
                         invNumber = invCell.getStringCellValue().trim();
                     } else if (invCell.getCellType() == org.apache.poi.ss.usermodel.CellType.NUMERIC) {
-                        // Если эксель решил, что номер это число, убираем нули после запятой
                         invNumber = String.valueOf((long) invCell.getNumericCellValue());
                     }
                 }
 
-                // Колонка L (индекс 11) - Количество
                 org.apache.poi.ss.usermodel.Cell qtyCell = row.getCell(11);
-                int qty = 1; // По умолчанию 1
+                int qty = 1;
                 if (qtyCell != null && qtyCell.getCellType() == org.apache.poi.ss.usermodel.CellType.NUMERIC) {
                     qty = (int) qtyCell.getNumericCellValue();
                 }
@@ -310,7 +292,7 @@ public class ExcelImporter {
             return "❌ Ошибка при чтении Excel файла с инструментом: " + e.getMessage();
         }
     }
-    // Чтение плана ОРШ
+
     public static String importOrshSheet(File file) {
         List<DatabaseManager.ParsedOrsh> list = new ArrayList<>();
         try (FileInputStream fis = new FileInputStream(file);
@@ -318,14 +300,13 @@ public class ExcelImporter {
 
             org.apache.poi.ss.usermodel.Sheet sheet = workbook.getSheetAt(0);
             for (org.apache.poi.ss.usermodel.Row row : sheet) {
-                if (row.getRowNum() == 0) continue; // Пропуск заголовка
+                if (row.getRowNum() == 0) continue;
 
                 org.apache.poi.ss.usermodel.Cell numCell = row.getCell(0);
                 if (numCell == null) continue;
 
                 DatabaseManager.ParsedOrsh o = new DatabaseManager.ParsedOrsh();
 
-                // Читаем как текст или как число без нулей
                 if (numCell.getCellType() == org.apache.poi.ss.usermodel.CellType.NUMERIC) {
                     o.number = String.valueOf((long) numCell.getNumericCellValue());
                 } else {

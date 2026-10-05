@@ -2,6 +2,9 @@ import java.sql.*;
 import java.text.DecimalFormat;
 import java.text.DecimalFormatSymbols;
 import java.util.*;
+import java.time.LocalDate;
+import java.time.format.TextStyle;
+import java.util.Locale;
 
 public class DatabaseManager {
     private static final String DB_URL = "jdbc:sqlite:warehouse.db";
@@ -192,6 +195,19 @@ public class DatabaseManager {
                             status_code TEXT
                         );
                     """);
+
+            stmt.execute("""
+                CREATE TABLE IF NOT EXISTS schedules_v2 (
+                    excel_name TEXT,
+                    year INTEGER,
+                    month INTEGER,
+                    day INTEGER,
+                    status_code TEXT,
+                    start_time TEXT,
+                    end_time TEXT,
+                    UNIQUE(excel_name, year, month, day)
+                );
+            """);
 
             stmt.execute("""
                 CREATE TABLE IF NOT EXISTS tools (
@@ -1125,13 +1141,8 @@ public class DatabaseManager {
 
     public static List<String> getAvailableExcelNames() {
         List<String> names = new ArrayList<>();
-        try (Connection conn = getConnection();
-             Statement stmt = conn.createStatement();
-             // ВАЖНОЕ ИЗМЕНЕНИЕ: Исключаем фамилии, которые уже кем-то заняты
-             ResultSet rs = stmt.executeQuery(
-                     "SELECT DISTINCT excel_name FROM schedules " +
-                             "WHERE excel_name NOT IN (SELECT excel_name FROM user_excel_names) " +
-                             "ORDER BY excel_name")) {
+        try (Connection conn = getConnection(); Statement stmt = conn.createStatement();
+             ResultSet rs = stmt.executeQuery("SELECT DISTINCT excel_name FROM schedules_v2 WHERE excel_name NOT IN (SELECT excel_name FROM user_excel_names) ORDER BY excel_name")) {
             while (rs.next()) names.add(rs.getString("excel_name"));
         } catch (SQLException e) { e.printStackTrace(); }
         return names;
@@ -1140,9 +1151,8 @@ public class DatabaseManager {
     // Метод для получения ВСЕХ фамилий из загруженного графика
     public static List<String> getAllExcelNames() {
         List<String> names = new ArrayList<>();
-        try (Connection conn = getConnection();
-             Statement stmt = conn.createStatement();
-             ResultSet rs = stmt.executeQuery("SELECT DISTINCT excel_name FROM schedules ORDER BY excel_name")) {
+        try (Connection conn = getConnection(); Statement stmt = conn.createStatement();
+             ResultSet rs = stmt.executeQuery("SELECT DISTINCT excel_name FROM schedules_v2 ORDER BY excel_name")) {
             while (rs.next()) names.add(rs.getString("excel_name"));
         } catch (SQLException e) { e.printStackTrace(); }
         return names;
@@ -1193,25 +1203,27 @@ public class DatabaseManager {
         } catch (Exception e) { return ""; }
     }
 
-    public static String getFormattedSchedule(String excelName) {
+    public static String getFormattedSchedule(String excelName, int year, int month) {
         StringBuilder sb = new StringBuilder();
+        String[] monthNames = {"", "ЯНВАРЬ", "ФЕВРАЛЬ", "МАРТ", "АПРЕЛЬ", "МАЙ", "ИЮНЬ", "ИЮЛЬ", "АВГУСТ", "СЕНТЯБРЬ", "ОКТЯБРЬ", "НОЯБРЬ", "ДЕКАБРЬ"};
+        String mName = monthNames[month];
+
         try (Connection conn = getConnection();
-             PreparedStatement ps = conn.prepareStatement("SELECT month_name, year_val, day_num, start_time, end_time, status_code FROM schedules WHERE excel_name = ? ORDER BY day_num ASC")) {
+             PreparedStatement ps = conn.prepareStatement("SELECT day, start_time, end_time, status_code FROM schedules_v2 WHERE excel_name = ? AND year = ? AND month = ? ORDER BY day ASC")) {
             ps.setString(1, excelName);
+            ps.setInt(2, year);
+            ps.setInt(3, month);
             ResultSet rs = ps.executeQuery();
             int weekNumber = 1;
             boolean hasData = false;
 
             while (rs.next()) {
-                int dayNum = rs.getInt("day_num");
-                int year = rs.getInt("year_val");
-                String monthName = rs.getString("month_name");
-                int monthNum = getMonthNumber(monthName);
-                java.time.LocalDate date = java.time.LocalDate.of(year, monthNum, dayNum);
-                String dayOfWeek = getDayOfWeekRu(year, monthNum, dayNum);
+                int dayNum = rs.getInt("day");
+                java.time.LocalDate date = java.time.LocalDate.of(year, month, dayNum);
+                String dayOfWeek = getDayOfWeekRu(year, month, dayNum);
 
                 if (!hasData) {
-                    sb.append(String.format("🗓 <b>График на %s %d г.</b>\n👤 Сотрудник: <b>%s</b>\n\n➖ <b>Неделя %d</b> ➖➖➖➖➖➖\n", monthName, year, excelName, weekNumber));
+                    sb.append(String.format("🗓 <b>График на %s %d г.</b>\n👤 Сотрудник: <b>%s</b>\n\n➖ <b>Неделя %d</b> ➖➖➖➖➖➖\n", mName, year, excelName, weekNumber));
                     hasData = true;
                 } else if (date.getDayOfWeek() == java.time.DayOfWeek.MONDAY) {
                     weekNumber++;
@@ -1230,6 +1242,14 @@ public class DatabaseManager {
                     line = String.format("🌴 <b>%s, %02d</b> — Отпуск", dayOfWeek, dayNum);
                 } else if ("Д".equals(statusCode)) {
                     line = String.format("🚨 <u><b>%s, %02d</b></u> — ❗️ <b>Дежурство</b>", dayOfWeek, dayNum);
+                } else if ("Б".equals(statusCode)) {
+                    line = String.format("💊 <b>%s, %02d</b> — Больничный", dayOfWeek, dayNum);
+                } else if ("А".equals(statusCode)) {
+                    line = String.format("📄 <b>%s, %02d</b> — За свой счет", dayOfWeek, dayNum);
+                } else if ("Г".equals(statusCode)) {
+                    line = String.format("🪖 <b>%s, %02d</b> — Военкомат", dayOfWeek, dayNum);
+                } else if ("П".equals(statusCode)) {
+                    line = String.format("🏢 <b>%s, %02d</b> — Др. подразделение", dayOfWeek, dayNum);
                 } else {
                     String icon = "🟩";
                     if (start != null && (start.startsWith("11:") || start.startsWith("12:") || start.startsWith("13:") || start.startsWith("14:"))) icon = "🟧";
@@ -1244,7 +1264,7 @@ public class DatabaseManager {
                 }
                 sb.append(line).append("\n");
             }
-            if (!hasData) return "ℹ️ График для сотрудника <b>" + excelName + "</b> не найден в базе. Попросите администратора загрузить файл.";
+            if (!hasData) return "ℹ️ График для сотрудника <b>" + excelName + "</b> на " + mName + " " + year + " г. не найден в базе.";
         } catch (SQLException e) {
             e.printStackTrace();
             return "❌ Ошибка при чтении графика из базы данных.";
@@ -1252,35 +1272,29 @@ public class DatabaseManager {
         return sb.toString();
     }
 
-    private static int getSeniorityRank(String excelName) {
-        if (excelName == null) return 99;
-        String lower = excelName.toLowerCase();
-        if (lower.contains("прищепчик") || lower.contains("витько")) return 1;
-        if (lower.contains("белевич")) return 2;
-        if (lower.contains("шаметько")) return 3;
-        if (lower.contains("максимов")) return 4;
-        return 99;
-    }
-
     public static String getShiftPartners(String excelName) {
-        StringBuilder sb = new StringBuilder("🤝 <b>Ваши напарники по вторым сменам и субботам:</b>\n\n");
+        StringBuilder sb = new StringBuilder("🤝 <b>Ваши напарники по вторым сменам и субботам (текущий месяц):</b>\n\n");
         try (Connection conn = getConnection()) {
-            String userDaysSql = "SELECT day_num, year_val, month_name, start_time, end_time FROM schedules WHERE excel_name = ? AND status_code NOT IN ('В', 'О', 'Д') ORDER BY day_num ASC";
+            // Берем текущий месяц
+            java.time.LocalDate now = java.time.LocalDate.now();
+            int currentMonth = now.getMonthValue();
+            int currentYear = now.getYear();
+
+            String userDaysSql = "SELECT day as day_num, start_time, end_time FROM schedules_v2 WHERE excel_name = ? AND year = ? AND month = ? AND status_code NOT IN ('В', 'О', 'Д', 'Б', 'А', 'Г', 'П') ORDER BY day_num ASC";
             boolean foundAny = false;
 
             try (PreparedStatement psUser = conn.prepareStatement(userDaysSql)) {
                 psUser.setString(1, excelName);
+                psUser.setInt(2, currentYear);
+                psUser.setInt(3, currentMonth);
                 ResultSet rsUser = psUser.executeQuery();
 
                 while (rsUser.next()) {
                     int dayNum = rsUser.getInt("day_num");
-                    int year = rsUser.getInt("year_val");
-                    String monthName = rsUser.getString("month_name");
                     String start = rsUser.getString("start_time");
                     String end = rsUser.getString("end_time");
 
-                    int monthNum = getMonthNumber(monthName);
-                    java.time.LocalDate date = java.time.LocalDate.of(year, monthNum, dayNum);
+                    java.time.LocalDate date = java.time.LocalDate.of(currentYear, currentMonth, dayNum);
                     boolean isSaturday = date.getDayOfWeek() == java.time.DayOfWeek.SATURDAY;
                     boolean isSecondShift = false;
 
@@ -1289,13 +1303,13 @@ public class DatabaseManager {
 
                     if (isSaturday || isSecondShift) {
                         foundAny = true;
-                        String allWorkersSql = "SELECT excel_name, start_time, end_time FROM schedules WHERE day_num = ? AND month_name = ? AND year_val = ? AND status_code NOT IN ('В', 'О', 'Д')";
+                        String allWorkersSql = "SELECT excel_name, start_time, end_time FROM schedules_v2 WHERE day = ? AND month = ? AND year = ? AND status_code NOT IN ('В', 'О', 'Д', 'Б', 'А', 'Г', 'П')";
                         List<String> allWorkersThisShift = new ArrayList<>();
 
                         try (PreparedStatement psAll = conn.prepareStatement(allWorkersSql)) {
                             psAll.setInt(1, dayNum);
-                            psAll.setString(2, monthName);
-                            psAll.setInt(3, year);
+                            psAll.setInt(2, currentMonth);
+                            psAll.setInt(3, currentYear);
                             ResultSet rsAll = psAll.executeQuery();
                             while (rsAll.next()) {
                                 String pName = rsAll.getString("excel_name");
@@ -1329,8 +1343,8 @@ public class DatabaseManager {
                             else normalLines.add(" • " + w);
                         }
 
-                        String dayOfWeekRu = getDayOfWeekRu(year, monthNum, dayNum);
-                        String headerPrefix = isSaturday ? String.format("📅 <b>%02d.%02d (%s)</b>", dayNum, monthNum, dayOfWeekRu) : String.format("📅 <b>%02d.%02d (%s) — Вторая смена</b>", dayNum, monthNum, dayOfWeekRu);
+                        String dayOfWeekRu = getDayOfWeekRu(currentYear, currentMonth, dayNum);
+                        String headerPrefix = isSaturday ? String.format("📅 <b>%02d.%02d (%s)</b>", dayNum, currentMonth, dayOfWeekRu) : String.format("📅 <b>%02d.%02d (%s) — Вторая смена</b>", dayNum, currentMonth, dayOfWeekRu);
                         if (iAmSenior) headerPrefix += "  👑 <i>(Вы старший смены!)</i>";
 
                         sb.append(headerPrefix).append("\n");
@@ -1353,6 +1367,44 @@ public class DatabaseManager {
         return sb.toString();
     }
 
+    private static int getSeniorityRank(String excelName) {
+        if (excelName == null) return 99;
+        String lower = excelName.toLowerCase();
+        if (lower.contains("прищепчик") || lower.contains("витько")) return 1;
+        if (lower.contains("белевич")) return 2;
+        if (lower.contains("шаметько")) return 3;
+        if (lower.contains("максимов")) return 4;
+        return 99;
+    }
+
+
+    private static String getShiftForDate(LocalDate date, String label, String monthNameText) {
+        StringBuilder sb = new StringBuilder("🗓 <b>" + label + " (" + date.getDayOfMonth() + " " + monthNameText + "):</b>\n");
+        try (Connection conn = getConnection();
+             PreparedStatement ps = conn.prepareStatement(
+                     "SELECT excel_name, status_code, start_time, end_time FROM schedules_v2 WHERE year = ? AND month = ? AND day = ? AND status_code NOT IN ('В', 'О') ORDER BY start_time")) {
+            ps.setInt(1, date.getYear());
+            ps.setInt(2, date.getMonthValue());
+            ps.setInt(3, date.getDayOfMonth());
+            ResultSet rs = ps.executeQuery();
+            boolean hasPeople = false;
+            while (rs.next()) {
+                hasPeople = true;
+                String name = rs.getString("excel_name");
+                String status = rs.getString("status_code");
+                String start = rs.getString("start_time");
+                String end = rs.getString("end_time");
+
+                String shift = ("Д".equals(status)) ? "Дежурство" : start + " - " + end;
+                sb.append("▫️ ").append(name).append(" [").append(shift).append("]\n");
+            }
+            if (!hasPeople) sb.append("▫️ Никого нет (все выходные)\n");
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
+        return sb.toString();
+    }
+
     public static class ReceiptItem {
         public int dbId;
         public String name;
@@ -1367,6 +1419,44 @@ public class DatabaseManager {
         public List<ReceiptItem> items = new ArrayList<>();
         public int waitingServiceId = -1;
         public int waitingMaterialId = -1;
+    }
+
+    public static class ScheduleDayV2 {
+        public String excelName;
+        public int dayNum;
+        public String statusCode;
+        public String startTime;
+        public String endTime;
+    }
+
+    // Сохраняем расписание с умным перезаливом (Upsert)
+    public static String saveImportedScheduleV2(List<ScheduleDayV2> days, int year, int month) {
+        try (Connection conn = getConnection()) {
+            conn.setAutoCommit(false);
+            try (PreparedStatement ps = conn.prepareStatement(
+                    "INSERT OR REPLACE INTO schedules_v2 (excel_name, year, month, day, status_code, start_time, end_time) VALUES (?, ?, ?, ?, ?, ?, ?)")) {
+                for (ScheduleDayV2 d : days) {
+                    ps.setString(1, d.excelName);
+                    ps.setInt(2, year);
+                    ps.setInt(3, month);
+                    ps.setInt(4, d.dayNum);
+                    ps.setString(5, d.statusCode);
+                    ps.setString(6, d.startTime);
+                    ps.setString(7, d.endTime);
+                    ps.addBatch();
+                }
+                ps.executeBatch();
+                conn.commit();
+                return "✅ <b>График успешно загружен/обновлен!</b>\nДанные за " + month + "." + year + " сохранены в базе.";
+            } catch (SQLException e) {
+                conn.rollback();
+                e.printStackTrace();
+                return "❌ Ошибка при сохранении графика: " + e.getMessage();
+            }
+        } catch (SQLException e) {
+            e.printStackTrace();
+            return "❌ Ошибка БД: " + e.getMessage();
+        }
     }
 
     public static List<String[]> getAllServicesForReceipt() {
@@ -2153,5 +2243,166 @@ public class DatabaseManager {
             ps.setInt(1, id);
             ps.executeUpdate();
         } catch (SQLException e) { e.printStackTrace(); }
+    }
+    // Метод для "Карманного редактора" (точечное изменение одной смены)
+    public static String updateSingleShift(String excelName, int year, int month, int day, String statusCode, String startTime, String endTime) {
+        try (Connection conn = getConnection();
+             PreparedStatement ps = conn.prepareStatement(
+                     "INSERT OR REPLACE INTO schedules_v2 (excel_name, year, month, day, status_code, start_time, end_time) VALUES (?, ?, ?, ?, ?, ?, ?)")) {
+            ps.setString(1, excelName);
+            ps.setInt(2, year);
+            ps.setInt(3, month);
+            ps.setInt(4, day);
+            ps.setString(5, statusCode);
+            ps.setString(6, startTime);
+            ps.setString(7, endTime);
+            ps.executeUpdate();
+            return "✅ График обновлен!";
+        } catch (SQLException e) {
+            e.printStackTrace();
+            return "❌ Ошибка БД при обновлении смены.";
+        }
+    }
+
+    // Метод для поиска ID сотрудника (чтобы прислать ему уведомление об изменении графика)
+    public static Long getUserIdByExcelName(String excelName) {
+        try (Connection conn = getConnection();
+             PreparedStatement ps = conn.prepareStatement("SELECT user_id FROM user_excel_names WHERE excel_name = ?")) {
+            ps.setString(1, excelName);
+            ResultSet rs = ps.executeQuery();
+            if (rs.next()) return rs.getLong("user_id");
+        } catch (SQLException e) { e.printStackTrace(); }
+        return null;
+    }
+    // Метод: Утренняя сводка (Кто сегодня работает?)
+    // Метод: Утренняя сводка (Кто сегодня работает?)
+    public static String getTodayRoster() {
+        java.time.LocalDate today = java.time.LocalDate.now();
+        int year = today.getYear();
+        int month = today.getMonthValue();
+        int day = today.getDayOfMonth();
+        String dayOfWeekRu = getDayOfWeekRu(year, month, day);
+
+        StringBuilder sb = new StringBuilder();
+        sb.append(String.format("📅 <b>Сводка на сегодня (%02d.%02d.%d, %s):</b>\n\n", day, month, year, dayOfWeekRu));
+
+        List<String> firstShift = new ArrayList<>();
+        List<String> secondShift = new ArrayList<>();
+        List<String> duty = new ArrayList<>();
+        List<String> otherDept = new ArrayList<>(); // <-- Наша новая группа
+        List<String> absent = new ArrayList<>();
+
+        try (Connection conn = getConnection();
+             PreparedStatement ps = conn.prepareStatement(
+                     "SELECT excel_name, start_time, end_time, status_code FROM schedules_v2 WHERE year = ? AND month = ? AND day = ? ORDER BY excel_name")) {
+
+            ps.setInt(1, year);
+            ps.setInt(2, month);
+            ps.setInt(3, day);
+            ResultSet rs = ps.executeQuery();
+
+            boolean hasAnyData = false;
+            while (rs.next()) {
+                hasAnyData = true;
+                String name = rs.getString("excel_name");
+                String start = rs.getString("start_time");
+                String end = rs.getString("end_time");
+                String status = rs.getString("status_code");
+
+                if ("В".equals(status)) {
+                    absent.add("▪️ " + name + " — 🏖 Выходной");
+                } else if ("О".equals(status)) {
+                    absent.add("▪️ " + name + " — 🌴 Отпуск");
+                } else if ("Б".equals(status)) {
+                    absent.add("▪️ " + name + " — 💊 Больничный");
+                } else if ("А".equals(status)) {
+                    absent.add("▪️ " + name + " — 📄 За свой счет");
+                } else if ("Г".equals(status)) {
+                    absent.add("▪️ " + name + " — 🪖 Военкомат");
+                } else if ("П".equals(status)) {
+                    // Теперь статус "П" попадает в свой собственный список (подпись убрана, т.к. будет общий заголовок)
+                    otherDept.add("▪️ " + name);
+                } else if ("Д".equals(status)) {
+                    duty.add("▪️ " + name + " — ❗️ Дежурство");
+                } else {
+                    // Определяем смену по времени
+                    boolean isSecond = false;
+                    if (end != null && (end.contains("21:00") || end.contains("21.00"))) isSecond = true;
+                    else if (start != null && (start.startsWith("11:") || start.startsWith("12:") || start.startsWith("13:") || start.startsWith("14:"))) isSecond = true;
+
+                    String timeStr = (start != null && end != null && !start.isEmpty() && !end.isEmpty()) ? " (" + start + " - " + end + ")" : "";
+
+                    if (isSecond) {
+                        secondShift.add("▪️ " + name + timeStr);
+                    } else {
+                        firstShift.add("▪️ " + name + timeStr);
+                    }
+                }
+            }
+
+            if (!hasAnyData) return "ℹ️ На сегодняшний день график еще не загружен.";
+
+            if (!firstShift.isEmpty()) {
+                sb.append("☀️ <b>Первая смена:</b>\n").append(String.join("\n", firstShift)).append("\n\n");
+            }
+            if (!secondShift.isEmpty()) {
+                sb.append("🌙 <b>Вторая смена:</b>\n").append(String.join("\n", secondShift)).append("\n\n");
+            }
+            if (!duty.isEmpty()) {
+                sb.append("🚨 <b>Дежурство:</b>\n").append(String.join("\n", duty)).append("\n\n");
+            }
+            // Выводим наш новый блок перед отсутствующими
+            if (!otherDept.isEmpty()) {
+                sb.append("🏢 <b>В другом подразделении:</b>\n").append(String.join("\n", otherDept)).append("\n\n");
+            }
+            if (!absent.isEmpty()) {
+                sb.append("❌ <b>Отсутствуют:</b>\n").append(String.join("\n", absent));
+            }
+
+        } catch (SQLException e) {
+            e.printStackTrace();
+            return "❌ Ошибка при получении сводки.";
+        }
+
+        return sb.toString().trim();
+    }
+    // Метод: Полное удаление сотрудника из графиков (увольнение / армия) с игнорированием регистра
+    public static String removeWorkerFromSchedule(String inputName) {
+        String exactName = null;
+        String searchLower = inputName.toLowerCase();
+
+        try (Connection conn = getConnection()) {
+            // 1. Ищем точное имя с учетом кириллицы (через Java)
+            try (Statement stmt = conn.createStatement();
+                 ResultSet rs = stmt.executeQuery("SELECT excel_name FROM schedules_v2 UNION SELECT excel_name FROM user_excel_names")) {
+                while (rs.next()) {
+                    String dbName = rs.getString(1);
+                    if (dbName != null && dbName.toLowerCase().contains(searchLower)) {
+                        exactName = dbName;
+                        break; // Нашли совпадение!
+                    }
+                }
+            }
+
+            if (exactName == null) {
+                return "ℹ️ Сотрудник <b>" + inputName + "</b> не найден в базе графиков.";
+            }
+
+            // 2. Удаляем все его смены из расписания по точному совпадению
+            PreparedStatement ps1 = conn.prepareStatement("DELETE FROM schedules_v2 WHERE excel_name = ?");
+            ps1.setString(1, exactName);
+            int deletedDays = ps1.executeUpdate();
+
+            // 3. Удаляем его из таблицы привязок
+            PreparedStatement ps2 = conn.prepareStatement("DELETE FROM user_excel_names WHERE excel_name = ?");
+            ps2.setString(1, exactName);
+            ps2.executeUpdate();
+
+            return "✅ Сотрудник <b>" + exactName + "</b> успешно удален из графиков!\nУдалено записей смен: " + deletedDays;
+
+        } catch (SQLException e) {
+            e.printStackTrace();
+            return "❌ Ошибка базы данных при удалении сотрудника: " + e.getMessage();
+        }
     }
 }

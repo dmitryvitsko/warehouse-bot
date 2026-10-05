@@ -67,37 +67,33 @@ public class Main {
                                 continue;
                             }
 
-                            // Узнаем окончание смены для этого человека на СЕГОДНЯ
-                            String schedSql = "SELECT month_name, year_val, day_num, end_time FROM schedules WHERE excel_name = ?";
+                            // Узнаем окончание смены для этого человека на СЕГОДНЯ из актуальной таблицы schedules_v2
+                            String schedSql = "SELECT end_time FROM schedules_v2 WHERE excel_name = ? AND year = ? AND month = ? AND day = ?";
                             try (PreparedStatement psSched = conn.prepareStatement(schedSql)) {
                                 psSched.setString(1, excelName);
+                                psSched.setInt(2, today.getYear());
+                                psSched.setInt(3, today.getMonthValue());
+                                psSched.setInt(4, today.getDayOfMonth());
 
                                 try (ResultSet rsSched = psSched.executeQuery()) {
-                                    while (rsSched.next()) {
-                                        int y = rsSched.getInt("year_val");
-                                        int d = rsSched.getInt("day_num");
-                                        int m = getMonthNumber(rsSched.getString("month_name"));
+                                    // Если на сегодня есть запись в графике
+                                    if (rsSched.next()) {
+                                        String endStr = rsSched.getString("end_time");
+                                        LocalTime shiftEnd = parseTimeSafe(endStr);
 
-                                        // Если нашли расписание именно на сегодняшнюю дату
-                                        if (y == today.getYear() && m == today.getMonthValue() && d == today.getDayOfMonth()) {
-                                            String endStr = rsSched.getString("end_time");
-                                            LocalTime shiftEnd = parseTimeSafe(endStr);
+                                        if (shiftEnd != null) {
+                                            // Вычисляем, сколько минут осталось до конца смены
+                                            long minutesLeft = ChronoUnit.MINUTES.between(now, shiftEnd);
 
-                                            if (shiftEnd != null) {
-                                                // Вычисляем, сколько минут осталось до конца смены
-                                                long minutesLeft = ChronoUnit.MINUTES.between(now, shiftEnd);
+                                            // Если до конца смены осталось от 0 до 15 минут
+                                            if (minutesLeft >= 0 && minutesLeft <= 15) {
 
-                                                // Если до конца смены осталось от 0 до 15 минут
-                                                if (minutesLeft >= 0 && minutesLeft <= 15) {
+                                                // 1. НАКЛАДЫВАЕМ ЖЕСТКУЮ БЛОКИРОВКУ
+                                                bot.getForceWelderReturnIds().put(userId, welderId);
 
-                                                    // 1. НАКЛАДЫВАЕМ ЖЕСТКУЮ БЛОКИРОВКУ
-                                                    bot.getForceWelderReturnIds().put(userId, welderId);
-
-                                                    // 2. ОТПРАВЛЯЕМ СООБЩЕНИЕ С КНОПКАМИ
-                                                    sendWarning(bot, userId, welderId, welderName, minutesLeft);
-                                                }
+                                                // 2. ОТПРАВЛЯЕМ СООБЩЕНИЕ С КНОПКАМИ
+                                                sendWarning(bot, userId, welderId, welderName, minutesLeft);
                                             }
-                                            break; // Сегодняшний график найден, дальше не ищем
                                         }
                                     }
                                 }
@@ -157,20 +153,5 @@ public class Main {
         } catch (Exception e) {
             return null;
         }
-    }
-
-    /**
-     * Определение номера месяца из текстового названия
-     */
-    private static int getMonthNumber(String monthName) {
-        if (monthName == null) return LocalDate.now().getMonthValue();
-        String m = monthName.toUpperCase();
-        if (m.contains("ЯНВАР")) return 1; if (m.contains("ФЕВРАЛ")) return 2;
-        if (m.contains("МАРТ")) return 3; if (m.contains("АПРЕЛ")) return 4;
-        if (m.contains("МА")) return 5; if (m.contains("ИЮН")) return 6;
-        if (m.contains("ИЮЛ")) return 7; if (m.contains("АВГУСТ")) return 8;
-        if (m.contains("СЕНТЯБР")) return 9; if (m.contains("ОКТЯБР")) return 10;
-        if (m.contains("НОЯБР")) return 11; if (m.contains("ДЕКАБР")) return 12;
-        return LocalDate.now().getMonthValue();
     }
 }

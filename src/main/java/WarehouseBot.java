@@ -21,6 +21,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
+import java.util.concurrent.ConcurrentHashMap;
 
 public class WarehouseBot extends TelegramLongPollingBot {
 
@@ -32,6 +33,8 @@ public class WarehouseBot extends TelegramLongPollingBot {
     private final Map<Long, Integer> waitingOrshPhoto = new HashMap<>();
     private final Map<Long, Integer> waitingOrshProblemReason = new HashMap<>();
     private final Map<Long, Integer> waitingDirContactCat = new HashMap<>();
+    private final Map<Long, Boolean> waitingNewEmployeeName = new ConcurrentHashMap<>();
+    private final Map<Long, Boolean> waitingSickLeaveDate = new ConcurrentHashMap<>();
 
     // Для карманного редактора смен
     private final Map<Long, String> waitingScheduleEditUser = new HashMap<>();
@@ -98,15 +101,21 @@ public class WarehouseBot extends TelegramLongPollingBot {
 
         KeyboardRow row2 = new KeyboardRow();
         row2.add("👁 График коллеги");
-        row2.add("👥 Кто сегодня работает?"); // <--- НАША НОВАЯ КНОПКА
+        row2.add("👥 Кто сегодня работает?");
         keyboard.add(row2);
 
+        // Новая кнопка для всех сотрудников
         KeyboardRow row3 = new KeyboardRow();
-        if ("ADMIN".equals(role)) {
-            row3.add("✏️ Изменить смену");
-        }
-        row3.add("🔙 Назад");
+        row3.add("🤒 Сообщить о больничном");
         keyboard.add(row3);
+
+        KeyboardRow row4 = new KeyboardRow();
+        if ("ADMIN".equals(role)) {
+            row4.add("✏️ Изменить смену");
+            row4.add("➕ Добавить сотрудника");
+        }
+        row4.add("🔙 Назад");
+        keyboard.add(row4);
 
         markup.setKeyboard(keyboard);
         message.setReplyMarkup(markup);
@@ -433,7 +442,8 @@ public class WarehouseBot extends TelegramLongPollingBot {
             if (data.startsWith("ED_SCH_U:") && "ADMIN".equals(role)) {
                 String excelName = data.substring(9);
                 waitingScheduleEditUser.put(chatId, excelName);
-                sendCancelKeyboard(chatId, "✏️ Выбран сотрудник: <b>" + excelName + "</b>\n\nНапишите дату ИЛИ период дат, которые нужно изменить.\n\n<i>Пример 1:</i> <code>15.11.2026</code>\n<i>Пример 2:</i> <code>01.11.2026-07.11.2026</code>");                return;
+                sendCancelKeyboard(chatId, "✏️ Выбран сотрудник: <b>" + excelName + "</b>\n\nНапишите дату ИЛИ период дат, которые нужно изменить.\n\n<i>Пример 1:</i> <code>15.11.2026</code>\n<i>Пример 2:</i> <code>01.11.2026-07.11.2026</code>");
+                return;
             }
 
             if (data.startsWith("ED_SCH_S:") && "ADMIN".equals(role)) {
@@ -446,7 +456,8 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 String dateRangeStr = mainParts[1];
 
                 String statusCode = ""; String start = ""; String end = "";
-                if (payload.equals("В") || payload.equals("О") || payload.equals("Д") || payload.equals("Б") || payload.equals("А") || payload.equals("Г") || payload.equals("П")) {                    statusCode = payload;
+                if (payload.equals("В") || payload.equals("О") || payload.equals("Д") || payload.equals("Б") || payload.equals("А") || payload.equals("Г") || payload.equals("П")) {
+                    statusCode = payload;
                 } else {
                     String[] times = payload.split("-");
                     start = times[0]; end = times[1];
@@ -480,7 +491,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
 
                     Long targetUserId = DatabaseManager.getUserIdByExcelName(targetUser);
                     if (targetUserId != null) {
-                        sendDirectNotification(targetUserId, "⚠️️ <b>ВНИМАНИЕ!</b>\nАдминистратор изменил ваш график!\nДата: <b>" + displayDate + "</b>\nНовая смена/статус: <b>" + (statusCode.isEmpty() ? payload : statusCode) + "</b>");
+                        sendDirectNotification(targetUserId, "⚠ <b>ВНИМАНИЕ!</b>\nАдминистратор изменил ваш график!\nДата: <b>" + displayDate + "</b>\nНовая смена/статус: <b>" + (statusCode.isEmpty() ? payload : statusCode) + "</b>");
                     }
                 } catch (Exception e) {
                     sendMenu(chatId, role, "❌ Ошибка при обработке дат.");
@@ -691,7 +702,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
                         item.quantity = 1.0; s.items.add(item); sendCartMenu(chatId, role);
                     } else {
                         s.waitingServiceId = srvId; s.waitingMaterialId = -1;
-                        sendCancelKeyboard(chatId, "✍️ <b>Введите количество</b> для выбранной услуги (например: 1 или 2):");
+                        sendCancelKeyboard(chatId, "✍️️ <b>Введите количество</b> для выбранной услуги (например: 1 или 2):");
                     }
                 }
                 return;
@@ -840,6 +851,26 @@ public class WarehouseBot extends TelegramLongPollingBot {
 
             if (checkUnboundAndNotify(chatId, role)) return;
 
+            if (text.equals("❌ Отменить") || text.equals("🔙 Назад")) {
+                waitingTakeMaterialId.remove(chatId); writeOffSessions.remove(chatId); fileWaitState.remove(chatId);
+                waitingToolWriteOffReason.remove(chatId); waitingOrshPhoto.remove(chatId); waitingOrshProblemReason.remove(chatId);
+                waitingDirContactCat.remove(chatId); waitingScheduleEditUser.remove(chatId); waitingScheduleEditDate.remove(chatId);
+                waitingNewEmployeeName.remove(chatId);
+                waitingSickLeaveDate.remove(chatId); // Очистка больничного
+
+                if (text.equals("❌ Отменить")) sendMenu(chatId, role, "🚫 <b>Действие отменено.</b>");
+                else sendMenu(chatId, role, "Вы вернулись в главное меню:");
+                return;
+            }
+
+            if (text.startsWith("📦") || text.startsWith("🧰") || text.startsWith("📝") || text.startsWith("📋") || text.startsWith("🔢") || text.startsWith("🤝") || text.startsWith("📊") || text.startsWith("📥") || text.startsWith("📑") || text.startsWith("🗓") || text.startsWith("🔍") || text.startsWith("📢") || text.startsWith("👥") || text.startsWith("🪛") || text.startsWith("🛠") || text.startsWith("📞") || text.startsWith("🔌") || text.startsWith("👁") || text.startsWith("✏️") || text.startsWith("🤒") || text.equals("/start")) {
+                waitingTakeMaterialId.remove(chatId); waitingDirContactCat.remove(chatId); writeOffSessions.remove(chatId);
+                fileWaitState.remove(chatId); waitingToolWriteOffReason.remove(chatId); waitingOrshPhoto.remove(chatId);
+                waitingOrshProblemReason.remove(chatId); waitingScheduleEditUser.remove(chatId); waitingScheduleEditDate.remove(chatId);
+                waitingNewEmployeeName.remove(chatId);
+                waitingSickLeaveDate.remove(chatId);
+            }
+
             if (waitingDirContactCat.containsKey(chatId)) {
                 int category = waitingDirContactCat.remove(chatId);
                 if (DatabaseManager.addDirectoryContact(category, text.trim(), chatId)) {
@@ -848,7 +879,12 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 } else sendMenu(chatId, role, "❌ Ошибка при сохранении контакта.");
                 return;
             }
-
+            if (waitingNewEmployeeName.containsKey(chatId)) {
+                waitingNewEmployeeName.remove(chatId);
+                String newName = text.trim();
+                sendMenu(chatId, role, DatabaseManager.addNewEmployeeToSchedule(newName));
+                return;
+            }
             if (waitingScheduleEditUser.containsKey(chatId)) {
                 String targetUser = waitingScheduleEditUser.remove(chatId);
                 try {
@@ -889,6 +925,55 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 return;
             }
 
+            if (waitingSickLeaveDate.containsKey(chatId)) {
+                waitingSickLeaveDate.remove(chatId);
+                String excelName = DatabaseManager.getUserExcelName(chatId);
+                if (excelName == null) {
+                    sendMenu(chatId, role, "❌ Ошибка: вы не привязаны к графику.");
+                    return;
+                }
+
+                try {
+                    String input = text.trim();
+                    java.time.format.DateTimeFormatter dtf = java.time.format.DateTimeFormatter.ofPattern("dd.MM.yyyy");
+                    java.time.LocalDate startDate;
+                    java.time.LocalDate endDate;
+                    String displayDate;
+
+                    if (input.contains("-")) {
+                        String[] parts = input.split("-");
+                        startDate = java.time.LocalDate.parse(parts[0].trim(), dtf);
+                        endDate = java.time.LocalDate.parse(parts[1].trim(), dtf);
+                        if (startDate.isAfter(endDate)) throw new Exception("Начальная дата больше конечной");
+                        displayDate = "с " + startDate.format(dtf) + " по " + endDate.format(dtf);
+                    } else {
+                        startDate = java.time.LocalDate.parse(input, dtf);
+                        endDate = startDate;
+                        displayDate = startDate.format(dtf);
+                    }
+
+                    // Обновляем базу данных
+                    java.time.LocalDate current = startDate;
+                    while (!current.isAfter(endDate)) {
+                        DatabaseManager.updateSingleShift(excelName, current.getYear(), current.getMonthValue(), current.getDayOfMonth(), "Б", "", "");
+                        current = current.plusDays(1);
+                    }
+
+                    sendMenu(chatId, role, "✅ Ваш больничный (" + displayDate + ") успешно зафиксирован! Выздоравливайте! 💊\n\n<i>Руководитель уведомлен, график обновлен.</i>");
+
+                    // Авто-уведомление для администраторов
+                    String adminMsg = "🚨 <b>ВНИМАНИЕ: Больничный!</b>\nСотрудник <b>" + excelName + "</b> сообщил о болезни.\nПериод: <b>" + displayDate + "</b>\n<i>Его график автоматически обновлен (статус \"Б\").</i>";
+                    for (Long adminId : DatabaseManager.getAdminIds()) {
+                        sendDirectNotification(adminId, adminMsg);
+                    }
+
+                } catch (Exception e) {
+                    sendCancelKeyboard(chatId, "❌ Неверный формат даты.\nПример правильного ввода: <code>15.10.2026</code> ИЛИ <code>15.10.2026-22.10.2026</code>");
+                    waitingSickLeaveDate.put(chatId, true); // Возвращаем в сессию, чтобы попробовал снова
+                }
+                return;
+            }
+
             if (text.startsWith("/unbind_") && "ADMIN".equals(role)) {
                 long targetId = Long.parseLong(text.replace("/unbind_", ""));
                 String realTgName = "Сотрудник";
@@ -921,22 +1006,8 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 blockMsg.setParseMode("HTML"); try { execute(blockMsg); } catch (TelegramApiException e) {} return;
             }
 
-            if (text.equals("❌ Отменить") || text.equals("🔙 Назад")) {
-                waitingTakeMaterialId.remove(chatId); writeOffSessions.remove(chatId); fileWaitState.remove(chatId);
-                waitingToolWriteOffReason.remove(chatId); waitingOrshPhoto.remove(chatId); waitingOrshProblemReason.remove(chatId);
-                waitingDirContactCat.remove(chatId); waitingScheduleEditUser.remove(chatId); waitingScheduleEditDate.remove(chatId);
-                if (text.equals("❌ Отменить")) sendMenu(chatId, role, "🚫 <b>Действие отменено.</b>");
-                else sendMenu(chatId, role, "Вы вернулись в главное меню:"); return;
-            }
-
             if (!text.equals("/start") && !text.equals("/fix") && !text.startsWith("/take_") && !text.startsWith("/give_")) {
                 if (isAdminBlockedByPendingRequests(chatId, role)) return;
-            }
-
-            if (text.startsWith("📦") || text.startsWith("🧰") || text.startsWith("📝") || text.startsWith("📋") || text.startsWith("🔢") || text.startsWith("🤝") || text.startsWith("📊") || text.startsWith("📥") || text.startsWith("📑") || text.startsWith("🗓") || text.startsWith("🔍") || text.startsWith("📢") || text.startsWith("👥") || text.startsWith("🪛") || text.startsWith("🛠") || text.startsWith("📞") || text.startsWith("🔌") || text.startsWith("👁") || text.startsWith("✏️") || text.equals("/start")) {
-                waitingTakeMaterialId.remove(chatId); waitingDirContactCat.remove(chatId); writeOffSessions.remove(chatId);
-                fileWaitState.remove(chatId); waitingToolWriteOffReason.remove(chatId); waitingOrshPhoto.remove(chatId);
-                waitingOrshProblemReason.remove(chatId); waitingScheduleEditUser.remove(chatId); waitingScheduleEditDate.remove(chatId);
             }
 
             if (text.startsWith("/take_") && "ADMIN".equals(role)) {
@@ -1041,6 +1112,12 @@ public class WarehouseBot extends TelegramLongPollingBot {
                         else sendNameBindingMenu(chatId, names);
                     }
                 }
+                case "➕ Добавить сотрудника" -> {
+                    if ("ADMIN".equals(role)) {
+                        waitingNewEmployeeName.put(chatId, true);
+                        sendCancelKeyboard(chatId, "👤 Введите ФИО нового сотрудника (например: <b>Баранов А.В.</b>):");
+                    }
+                }
                 case "👁 График коллеги" -> {
                     List<String> names = DatabaseManager.getAllExcelNames();
                     if (names.isEmpty()) sendMenu(chatId, role, "ℹ График работ еще не загружен администратором.");
@@ -1060,7 +1137,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
                         else {
                             InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
                             List<List<InlineKeyboardButton>> rows = new ArrayList<>();
-                            for (String name : names) rows.add(List.of(createBtn("✏️ " + name, "ED_SCH_U:" + name)));
+                            for (String name : names) rows.add(List.of(createBtn("✏️️ " + name, "ED_SCH_U:" + name)));
                             markup.setKeyboard(rows);
                             SendMessage msg = new SendMessage(String.valueOf(chatId), "✏️ <b>Редактор графиков</b>\nВыберите сотрудника, смену которого нужно изменить:");
                             msg.setParseMode("HTML"); msg.setReplyMarkup(markup); try { execute(msg); } catch (TelegramApiException e) {}
@@ -1092,6 +1169,15 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 case "📥 Загрузки (Excel)" -> {
                     if (role.equals("ADMIN")) {
                         sendUploadsMenu(chatId, "📥 <b>Меню загрузки файлов (Excel):</b>\nВыберите базу для обновления:");
+                    }
+                }
+                case "🤒 Сообщить о больничном" -> {
+                    String excelName = DatabaseManager.getUserExcelName(chatId);
+                    if (excelName == null) {
+                        sendMenu(chatId, role, "ℹ Ваш профиль еще не привязан к графику. Сначала нажмите «Мой график» и выберите фамилию.");
+                    } else {
+                        waitingSickLeaveDate.put(chatId, true);
+                        sendCancelKeyboard(chatId, "🤒 <b>Оформление больничного</b>\n\nВы оформляете больничный для: <b>" + excelName + "</b>\n\nНапишите дату ИЛИ период вашего больничного.\n\n<i>Пример 1:</i> <code>15.10.2026</code>\n<i>Пример 2:</i> <code>15.10.2026-22.10.2026</code>");
                     }
                 }
                 case "📥 Загрузить план ОРШ (Excel)" -> { if (role.equals("ADMIN")) { fileWaitState.put(chatId, "ORSH"); sendCancelKeyboard(chatId, "📁 Отправьте файл ПЛАНА ОРШ (Excel)."); } }
@@ -1136,10 +1222,10 @@ public class WarehouseBot extends TelegramLongPollingBot {
         sb.append("\n👷‍♂ <b>ИТР УЛКС №2</b>\n▪️ Нач. УЛКС №2 Лазуко С.В.: +375(17) 200-02-98, +375(29) 501-01-11\n▪ Зам. нач. УЛКС №2 Журко А.Н.: +375(17) 264-93-74, +375(29) 231-69-23\n▪ Рук. каб. группы Прохорчик В.Ю.: +375(17) 200-40-40, +375(29) 176-58-88\n▪️ Рук. гр. технадзора Снитко А.В.: +375(33) 347-28-85\n▪️ Рук. гр. малопарщиков Никитин Д.Д.: +375(44) 752-02-69\n▪ Рук. изм. группы Лабуза С.И.: +375(29) 701-88-29\n");
         for (String s : dyn.getOrDefault(2, new ArrayList<>())) sb.append("▪️ ").append(s).append("\n");
         sb.append("\n💻 <b>Технический отдел</b>\n▪ Рук. гр. технадзора Шашков В.П.: +375(29) 373-35-55\n▪️ Инж. технадзора Кононова Светлана: +375(29) 577-57-46\n▪ Магистральщики (Протасевич Юлия): +375(29) 560-80-82\n▪️ Профсоюзные дела (Луговцова Оксана): +375(29) 317-19-56\n");
-        for (String s : dyn.getOrDefault(3, new ArrayList<>())) sb.append("▪️️ ").append(s).append("\n");
+        for (String s : dyn.getOrDefault(3, new ArrayList<>())) sb.append("▪ ").append(s).append("\n");
         sb.append("\n🗂 <b>Администрация</b>\n▪️ Профком (Нестерова Е.Ю.): +375(17) 359-45-70\n▪️ Бухгалтерия по ЗП (Ромашко Ю.Г.): +375(17) 359-45-20\n▪️ Специалист по кадрам (Субач Е.В.): +375(17) 359-45-03\n");
-        for (String s : dyn.getOrDefault(4, new ArrayList<>())) sb.append("▪️️ ").append(s).append("\n");
-        sb.append("\n🚗 <b>АТЦ</b>\n▪️ Начальник Савицкий А.В.: +375(17) 369-05-25, +375(33) 603-32-73\n▪️ Зам. начальника Болбас Р.А.: +375(17) 369-03-93, +375(29) 840-78-37\n▪️ Инж. по БД Гузов А.П.: +375(17) 369-05-27, +375(29) 779-11-88\n");
+        for (String s : dyn.getOrDefault(4, new ArrayList<>())) sb.append("▪ ").append(s).append("\n");
+        sb.append("\n🚗 <b>АТЦ</b>\n▪️ Начальник Савицкий А.В.: +375(17) 369-05-25, +375(33) 603-32-73\n▪️ Зам. начальника Болбас Р.А.: +375(17) 369-03-93, +375(29) 840-78-37\n▪️️ Инж. по БД Гузов А.П.: +375(17) 369-05-27, +375(29) 779-11-88\n");
         for (String s : dyn.getOrDefault(5, new ArrayList<>())) sb.append("▪️ ").append(s).append("\n");
         sb.append("\n🔌 <b>Станционщики (магистраль / проключения)</b>\n▪️ Инженер Ивашкевич Дарья: +375(29) 555-38-48\n");
         for (String s : dyn.getOrDefault(6, new ArrayList<>())) sb.append("▪️ ").append(s).append("\n");

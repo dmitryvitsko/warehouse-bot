@@ -2405,4 +2405,42 @@ public class DatabaseManager {
             return "❌ Ошибка базы данных при удалении сотрудника: " + e.getMessage();
         }
     }
+    // Метод: Ручное добавление нового сотрудника в базу
+    public static String addNewEmployeeToSchedule(String excelName) {
+        java.time.LocalDate today = java.time.LocalDate.now();
+        int year = today.getYear();
+        int month = today.getMonthValue();
+        int daysInMonth = today.lengthOfMonth();
+
+        try (Connection conn = getConnection()) {
+            // Проверяем, нет ли его уже в базе на этот месяц
+            PreparedStatement check = conn.prepareStatement("SELECT count(*) FROM schedules_v2 WHERE excel_name = ? AND year = ? AND month = ?");
+            check.setString(1, excelName);
+            check.setInt(2, year);
+            check.setInt(3, month);
+            ResultSet rs = check.executeQuery();
+            if (rs.next() && rs.getInt(1) > 0) {
+                return "⚠️ Сотрудник <b>" + excelName + "</b> уже числится в графике на этот месяц.";
+            }
+
+            // Заполняем текущий месяц выходными ("В"), чтобы он появился в списках
+            PreparedStatement ps = conn.prepareStatement("INSERT INTO schedules_v2 (excel_name, year, month, day, status_code, start_time, end_time) VALUES (?, ?, ?, ?, ?, ?, ?)");
+            for (int day = 1; day <= daysInMonth; day++) {
+                ps.setString(1, excelName);
+                ps.setInt(2, year);
+                ps.setInt(3, month);
+                ps.setInt(4, day);
+                ps.setString(5, "В"); // По умолчанию ставим выходной
+                ps.setString(6, "");
+                ps.setString(7, "");
+                ps.addBatch();
+            }
+            ps.executeBatch();
+
+            return "✅ Сотрудник <b>" + excelName + "</b> успешно добавлен!\n\nЕму проставлены выходные до конца месяца. Теперь вы можете зайти в «✏️ Изменить смену» и задать ему рабочие дни.";
+        } catch (SQLException e) {
+            e.printStackTrace();
+            return "❌ Ошибка базы данных при добавлении сотрудника.";
+        }
+    }
 }

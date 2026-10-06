@@ -1,3 +1,4 @@
+import org.json.JSONObject;
 import org.telegram.telegrambots.bots.TelegramLongPollingBot;
 import org.telegram.telegrambots.meta.api.methods.AnswerCallbackQuery;
 import org.telegram.telegrambots.meta.api.methods.GetFile;
@@ -11,6 +12,8 @@ import org.telegram.telegrambots.meta.api.objects.replykeyboard.ReplyKeyboardMar
 import org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton;
 import org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.KeyboardRow;
 import org.telegram.telegrambots.meta.exceptions.TelegramApiException;
+import org.json.JSONArray;
+import java.util.function.Function;
 
 import java.io.File;
 import java.io.FileInputStream;
@@ -35,8 +38,9 @@ public class WarehouseBot extends TelegramLongPollingBot {
     private final Map<Long, Integer> waitingDirContactCat = new HashMap<>();
     private final Map<Long, Boolean> waitingNewEmployeeName = new ConcurrentHashMap<>();
     private final Map<Long, Boolean> waitingSickLeaveDate = new ConcurrentHashMap<>();
-    private final Map<Long, String> tmAuthStep = new HashMap<>();   // WAIT_LOGIN / WAIT_PASSWORD
-    private final Map<Long, String> tmTempLogin = new HashMap<>();  // временно храним логин, пока ждём пароль
+    private final Map<Long, String> tmAuthStep = new HashMap<>();
+    private final Map<Long, String> waitingTmReportTaskId = new HashMap<>();
+    private final Map<Long, String> tmTempLogin = new HashMap<>();
 
     // Для карманного редактора смен
     private final Map<Long, String> waitingScheduleEditUser = new HashMap<>();
@@ -427,7 +431,54 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 sendCancelKeyboard(chatId, "🗓 Отправьте файл <b>ГРАФИКА РАБОТ</b> (Excel) на <b>" + getMonthName(Integer.parseInt(p[2])) + " " + p[1] + "</b> прямо в этот чат.");
                 return;
             }
-
+            if ("TM_INPROGRESS".equals(data)) {
+                if (!"ADMIN".equals(role)) return;
+                JSONArray tasks = fetchTmTasks(chatId);
+                sendTmInProgressList(chatId, tasks);
+                AnswerCallbackQuery answer = new AnswerCallbackQuery();
+                answer.setCallbackQueryId(update.getCallbackQuery().getId());
+                try { execute(answer); } catch (TelegramApiException e) {}
+                return;
+            }
+            if ("TM_CLOSED".equals(data)) {
+                if (!"ADMIN".equals(role)) return;
+                JSONArray tasks = fetchTmTasks(chatId);
+                sendMenu(chatId, role, TmClient.formatTasksText(tasks, true));
+                AnswerCallbackQuery answer = new AnswerCallbackQuery();
+                answer.setCallbackQueryId(update.getCallbackQuery().getId());
+                try { execute(answer); } catch (TelegramApiException e) {}
+                return;
+            }
+            if (data.startsWith("TM_REPORT:")) {
+                if (!"ADMIN".equals(role)) return;
+                String taskId = data.substring("TM_REPORT:".length());
+                waitingTmReportTaskId.put(chatId, taskId);
+                sendCancelKeyboard(chatId, "📝 Напишите текст отчёта для заявки #" + taskId + ":");
+                AnswerCallbackQuery answer = new AnswerCallbackQuery();
+                answer.setCallbackQueryId(update.getCallbackQuery().getId());
+                try { execute(answer); } catch (TelegramApiException e) {}
+                return;
+            }
+            if (data.startsWith("TM_ASTUP:")) {
+                if (!"ADMIN".equals(role)) return;
+                String taskId = data.substring("TM_ASTUP:".length());
+                var astup = tmCallWithRetry(chatId, s -> TmClient.getAstup(s, taskId));
+                sendMenu(chatId, role, TmClient.formatAstup(astup));
+                AnswerCallbackQuery answer = new AnswerCallbackQuery();
+                answer.setCallbackQueryId(update.getCallbackQuery().getId());
+                try { execute(answer); } catch (TelegramApiException e) {}
+                return;
+            }
+            if (data.startsWith("TM_PARAMS:")) {
+                if (!"ADMIN".equals(role)) return;
+                String taskId = data.substring("TM_PARAMS:".length());
+                var params = tmCallWithRetry(chatId, s -> TmClient.measureParams(s, taskId));
+                sendMenu(chatId, role, TmClient.formatParams(params));
+                AnswerCallbackQuery answer = new AnswerCallbackQuery();
+                answer.setCallbackQueryId(update.getCallbackQuery().getId());
+                try { execute(answer); } catch (TelegramApiException e) {}
+                return;
+            }
             if (data.startsWith("MY_SCHED:")) {
                 String[] p = data.split(":");
                 String excelName = DatabaseManager.getUserExcelName(chatId);
@@ -1106,7 +1157,18 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 }
                 DatabaseManager.saveTmCredentials(chatId, login, text.trim());
                 DatabaseManager.saveTmSession(chatId, session);
-                sendMenu(chatId, role, TmClient.formatTasksText(TmClient.getTasks(session)));
+                JSONArray tasks = TmClient.getTasks(session);
+                if (tasks != null) sendTmTasksMenu(chatId, tasks);
+                else sendMenu(chatId, role, "❌ Не удалось получить заявки.");
+                return;
+            }
+            if (waitingTmReportTaskId.containsKey(chatId)) {
+                String taskId = waitingTmReportTaskId.remove(chatId);
+                String session = DatabaseManager.getTmSession(chatId);
+                boolean ok = session != null && TmClient.performTask(session, taskId, text.trim());
+                sendMenu(chatId, role, ok
+                        ? "✅ Отчёт по заявке #" + taskId + " отправлен."
+                        : "❌ Не удалось отправить отчёт. Попробуйте ещё раз через «Мои заявки (ТМ)».");
                 return;
             }
 
@@ -1135,21 +1197,10 @@ public class WarehouseBot extends TelegramLongPollingBot {
                     }
                 }
                 case "🛠 Мои заявки (ТМ)" -> {
-                    String session = DatabaseManager.getTmSession(chatId);
-                    if (session != null) {
-                        var tasks = TmClient.getTasks(session);
-                        if (tasks == null) { // сессия протухла — перелогиниваемся по сохранённым данным
-                            String[] creds = DatabaseManager.getTmCredentials(chatId);
-                            if (creds != null) {
-                                session = TmClient.login(creds[0], creds[1]);
-                                if (session != null) { DatabaseManager.saveTmSession(chatId, session); tasks = TmClient.getTasks(session); }
-                            }
-                        }
-                        sendMenu(chatId, role, TmClient.formatTasksText(tasks));
-                    } else {
-                        tmAuthStep.put(chatId, "WAIT_LOGIN");
-                        sendCancelKeyboard(chatId, "🔐 Введите логин от ТМ:");
-                    }
+                    if (!"ADMIN".equals(role)) break;
+                    JSONArray tasks = fetchTmTasks(chatId);
+                    if (tasks == null) sendMenu(chatId, role, "❌ Не удалось получить заявки. Попробуйте ещё раз.");
+                    else sendTmTasksMenu(chatId, tasks);
                 }
                 case "➕ Добавить сотрудника" -> {
                     if ("ADMIN".equals(role)) {
@@ -1538,6 +1589,73 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 if (!remaining.isEmpty()) { SendMessage msg = new SendMessage(String.valueOf(chatId), remaining); msg.setParseMode("HTML"); msg.setReplyMarkup(keyboardMarkup); execute(msg); }
             }
         } catch (TelegramApiException e) {}
+    }
+
+    private JSONArray fetchTmTasks(long chatId) {
+        String session = DatabaseManager.getTmSession(chatId);
+        JSONArray tasks = session != null ? TmClient.getTasks(session) : null;
+        if (tasks == null) {
+            String[] creds = DatabaseManager.getTmCredentials(chatId);
+            if (creds != null) {
+                session = TmClient.login(creds[0], creds[1]);
+                if (session != null) { DatabaseManager.saveTmSession(chatId, session); tasks = TmClient.getTasks(session); }
+            }
+        }
+        return tasks;
+    }
+
+    private JSONObject tmCallWithRetry(long chatId, Function<String, JSONObject> call) {
+        String session = DatabaseManager.getTmSession(chatId);
+        JSONObject result = session != null ? call.apply(session) : null;
+        if (result == null) {
+            String[] creds = DatabaseManager.getTmCredentials(chatId);
+            if (creds != null) {
+                String newSession = TmClient.login(creds[0], creds[1]);
+                if (newSession != null) {
+                    DatabaseManager.saveTmSession(chatId, newSession);
+                    result = call.apply(newSession);
+                }
+            }
+        }
+        return result;
+    }
+
+    private void sendTmTasksMenu(long chatId, JSONArray tasks) {
+        int inProgress = TmClient.countByStatus(tasks, false);
+        int closedCount = TmClient.countByStatus(tasks, true);
+
+        InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
+        List<List<InlineKeyboardButton>> rows = new ArrayList<>();
+        rows.add(List.of(createBtn("📋 В работе (" + inProgress + ")", "TM_INPROGRESS")));
+        rows.add(List.of(createBtn("✅ Закрытые (" + closedCount + ")", "TM_CLOSED")));
+        markup.setKeyboard(rows);
+
+        SendMessage msg = new SendMessage(String.valueOf(chatId), "🛠 <b>Мои заявки ТМ</b>\nВыберите раздел:");
+        msg.setParseMode("HTML");
+        msg.setReplyMarkup(markup);
+        try { execute(msg); } catch (TelegramApiException e) {}
+    }
+
+    private void sendTmInProgressList(long chatId, JSONArray tasks) {
+        if (tasks == null) { sendMenu(chatId, "ADMIN", "❌ Не удалось получить заявки."); return; }
+        JSONArray inProgress = TmClient.byStatus(tasks, false);
+        if (inProgress.isEmpty()) { sendMenu(chatId, "ADMIN", "📋 Заявок в работе нет."); return; }
+
+        for (int i = 0; i < inProgress.length(); i++) {
+            var task = inProgress.getJSONObject(i);
+            String taskId = task.optString("id");
+
+            InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
+            markup.setKeyboard(List.of(
+                    List.of(createBtn("📝 Отправить отчёт", "TM_REPORT:" + taskId)),
+                    List.of(createBtn("📍 АСТУП", "TM_ASTUP:" + taskId), createBtn("📊 Параметры", "TM_PARAMS:" + taskId))
+            ));
+
+            SendMessage msg = new SendMessage(String.valueOf(chatId), TmClient.formatTask(task));
+            msg.setParseMode("HTML");
+            msg.setReplyMarkup(markup);
+            try { execute(msg); } catch (TelegramApiException e) {}
+        }
     }
 
     private void sendPendingOrshList(long chatId) {

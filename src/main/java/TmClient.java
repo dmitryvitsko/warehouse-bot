@@ -332,4 +332,59 @@ public class TmClient {
             return null;
         }
     }
+    // --- НОВЫЕ МЕТОДЫ ДЛЯ ИСТОРИИ ЗАЯВОК ---
+
+    public static JSONObject getTaskHistory(String session, String taskId) {
+        try {
+            JSONObject params = new JSONObject();
+            params.put("session", session);
+            params.put("task", taskId);
+
+            JSONObject payload = new JSONObject();
+            payload.put("method", "History.task");
+            payload.put("params", params);
+
+            // Используем уже существующий в классе метод post()
+            return post(payload);
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+        return null;
+    }
+
+    public static String formatHistory(JSONObject historyObj, String taskId) {
+        if (historyObj == null || historyObj.optInt("code") != 1) {
+            return "📜 <b>История выездов (Заявка #" + taskId + "):</b>\n\n<i>❌ Не удалось получить историю или она пуста.</i>";
+        }
+
+        JSONArray history = historyObj.optJSONArray("result");
+        if (history == null || history.isEmpty()) {
+            return "📜 <b>История выездов (Заявка #" + taskId + "):</b>\n\n<i>История пуста.</i>";
+        }
+
+        StringBuilder sb = new StringBuilder();
+        sb.append("📜 <b>История выездов (Заявка #").append(taskId).append("):</b>\n\n");
+
+        for (int i = 0; i < history.length(); i++) {
+            JSONObject item = history.getJSONObject(i);
+            String date = item.optString("date", "Неизвестно");
+            String worker = item.optString("worker", "Неизвестный мастер");
+            String note = item.optString("note", "").trim();
+            String closeNote = item.optString("close_note", "").trim();
+
+            if (note.isEmpty()) note = "Нет данных";
+            if (closeNote.isEmpty()) closeNote = "Нет данных";
+
+            sb.append("🗓 <b>").append(date).append("</b>  |  👤 <i>").append(worker).append("</i>\n");
+            sb.append("🔴 <b>Заявка:</b>\n");
+            sb.append("<blockquote>").append(note.replace("<", "&lt;").replace(">", "&gt;")).append("</blockquote>\n");
+            sb.append("🟣 <b>Отчет:</b>\n");
+            sb.append("<blockquote>").append(closeNote.replace("<", "&lt;").replace(">", "&gt;")).append("</blockquote>");
+
+            if (i < history.length() - 1) {
+                sb.append("\n➖➖➖➖➖➖➖➖➖➖➖➖\n");
+            }
+        }
+        return sb.toString();
+    }
 }

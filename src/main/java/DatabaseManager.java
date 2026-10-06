@@ -404,43 +404,72 @@ public class DatabaseManager {
     }
 
     public static String getWeldersHistoryText() {
-        StringBuilder sb = new StringBuilder("📜 <b>Журнал движений сварочных аппаратов:</b>\n<i>(последние 40 операций)</i>\n\n");
         String sql = """
                     SELECT datetime(h.action_time, 'localtime') as local_time, w.name, u.full_name, h.action, a.full_name as admin_name
                     FROM welders_history h
                     JOIN welders w ON h.welder_id = w.id
                     JOIN users u ON h.user_id = u.id
                     LEFT JOIN users a ON h.admin_id = a.id
-                    ORDER BY h.action_time DESC LIMIT 40
+                    ORDER BY h.action_time DESC LIMIT 20
                 """;
-        boolean hasItems = false;
+
+        List<String> lines = new ArrayList<>();
+
         try (Connection conn = getConnection(); Statement stmt = conn.createStatement(); ResultSet rs = stmt.executeQuery(sql)) {
             while (rs.next()) {
-                hasItems = true;
                 String time = rs.getString("local_time");
+                String formattedTime = time;
+
+                // Превращаем "2026-10-05 14:20:00" в красивое "05.10 14:20"
+                try {
+                    if (time != null && time.length() >= 16) {
+                        String datePart = time.substring(0, 10);
+                        String timePart = time.substring(11, 16);
+                        String[] dp = datePart.split("-");
+                        formattedTime = dp[2] + "." + dp[1] + " " + timePart;
+                    }
+                } catch (Exception ignored) {}
+
                 String welderName = rs.getString("name");
                 String userName = rs.getString("full_name");
                 String action = rs.getString("action");
                 String adminName = rs.getString("admin_name");
 
-                String actionRu = switch (action) {
-                    case "TAKEN" -> "взял(а)";
-                    case "RETURNED" -> "сдал(а) на базу";
-                    case "FORCE_TAKEN" -> "выдано принудительно админом";
-                    case "FORCE_RETURNED" -> "возвращено принудительно админом";
-                    default -> action;
-                };
+                String line;
+                if (action.equals("FORCE_TAKEN") || action.equals("FORCE_RETURNED")) {
+                    String adminStr = (adminName != null) ? adminName : "Админ";
+                    if (action.equals("FORCE_TAKEN")) {
+                        line = String.format("▫️ `[%s]` 👑 <b>%s</b> принудительно выдал <b>%s</b> ➔ %s",
+                                formattedTime, adminStr, welderName, userName);
+                    } else {
+                        line = String.format("▫️ `[%s]` 👑 <b>%s</b> принудительно списал <b>%s</b> у %s",
+                                formattedTime, adminStr, welderName, userName);
+                    }
+                } else {
+                    String actionRu = action.equals("TAKEN") ? "взял" : "вернул";
+                    line = String.format("▫️ `[%s]` 👷‍♂️ %s %s <b>%s</b>",
+                            formattedTime, userName, actionRu, welderName);
+                }
 
-                String adminSuffix = (adminName != null && !action.equals("TAKEN") && !action.equals("RETURNED")) ? " (" + adminName + ")" : "";
-
-                String icon = (action.contains("TAKEN")) ? "🔴" : "🟢";
-                sb.append(String.format("%s <i>%s</i>\n<b>%s</b> — %s <b>%s</b>%s\n\n",
-                        icon, time, userName, actionRu, welderName, adminSuffix));
+                lines.add(line);
             }
         } catch (SQLException e) {
             e.printStackTrace();
         }
-        return hasItems ? sb.toString() : "📜 История пока пуста.";
+
+        if (lines.isEmpty()) {
+            return "📜 Журнал сварочных аппаратов пока пуст.";
+        }
+
+        // ПЕРЕВОРАЧИВАЕМ СПИСОК (старые записи сверху, самые новые снизу)
+        Collections.reverse(lines);
+
+        StringBuilder sb = new StringBuilder("📜 <b>История движения аппаратов</b>\n<i>(показаны последние 20 событий)</i>\n\n");
+        for (String l : lines) {
+            sb.append(l).append("\n");
+        }
+
+        return sb.toString();
     }
 
     public static String getWelderNameById(int id) {
@@ -1612,10 +1641,10 @@ public class DatabaseManager {
 
     public static String generateReceiptText(ReceiptSession session) {
         if (session.items.isEmpty()) return "🛒 Корзина квитанции пуста.";
-        StringBuilder sb = new StringBuilder("🧾 <b>АКТ-КВИТАНЦИЯ (Расчет для заполнения)</b>\n\n");
+        StringBuilder sb = new StringBuilder("🧾 <b>АКТ-КВИТАНЦИЯ (Расчет)</b>\n\n");
         double totalServicesVat = 0, totalServicesSum = 0, totalMaterialsVat = 0, totalMaterialsSum = 0;
 
-        sb.append("╔════ 🛠 <b>ВЫПОЛНЕННЫЕ РАБОТЫ</b> ════╗\n");
+        sb.append("🛠 <b>ВЫПОЛНЕННЫЕ РАБОТЫ:</b>\n");
         boolean hasServices = false;
         for (ReceiptItem item : session.items) {
             if (!item.isMaterial) {
@@ -1628,10 +1657,10 @@ public class DatabaseManager {
             }
         }
         if (!hasServices) sb.append("<i>Услуги не добавлялись</i>\n");
-        sb.append("╠═══════════════════════════════╣\n");
-        sb.append(String.format("Итого по работам: <b>%.2f руб.</b>\n(В том числе НДС 20%%: %.2f руб.)\n\n", totalServicesSum, totalServicesVat));
+        sb.append("➖➖➖➖➖➖➖➖➖➖➖➖\n");
+        sb.append(String.format("Итого по работам: <b>%.2f руб.</b>\n(В т.ч. НДС 20%%: %.2f руб.)\n\n", totalServicesSum, totalServicesVat));
 
-        sb.append("╔══ 📦 <b>ИЗРАСХОДОВАННЫЕ МАТЕРИАЛЫ</b> ══╗\n");
+        sb.append("📦 <b>ИЗРАСХОДОВАННЫЕ МАТЕРИАЛЫ:</b>\n");
         boolean hasMaterials = false;
         for (ReceiptItem item : session.items) {
             if (item.isMaterial) {
@@ -1644,11 +1673,10 @@ public class DatabaseManager {
             }
         }
         if (!hasMaterials) sb.append("<i>Материалы не добавлялись</i>\n");
-        sb.append("╠═══════════════════════════════╣\n");
-        sb.append(String.format("Итого по материалам: <b>%.2f руб.</b>\n(В том числе НДС 20%%: %.2f руб.)\n\n", totalMaterialsSum, totalMaterialsVat));
+        sb.append("➖➖➖➖➖➖➖➖➖➖➖➖\n");
+        sb.append(String.format("Итого по материалам: <b>%.2f руб.</b>\n(В т.ч. НДС 20%%: %.2f руб.)\n\n", totalMaterialsSum, totalMaterialsVat));
 
         double finalSum = totalServicesSum + totalMaterialsSum;
-        sb.append("═══════════════════════════════════\n");
         sb.append(String.format("💰 <b>ВСЕГО К ОПЛАТЕ: %.2f руб.</b>", finalSum));
         return sb.toString();
     }

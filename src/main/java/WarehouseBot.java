@@ -427,6 +427,51 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 return;
             }
 
+            if (data.startsWith("SL_APPROVE:") || data.startsWith("SL_REJECT:")) {
+                if (!"ADMIN".equals(role)) return;
+                boolean approve = data.startsWith("SL_APPROVE:");
+                long requestId = Long.parseLong(data.substring(data.indexOf(":") + 1));
+                String[] req = DatabaseManager.getSickLeaveRequest(requestId);
+
+                AnswerCallbackQuery answer = new AnswerCallbackQuery();
+                answer.setCallbackQueryId(update.getCallbackQuery().getId());
+
+                if (req == null || !"PENDING".equals(req[4])) {
+                    answer.setText("Запрос уже обработан или не найден.");
+                    try { execute(answer); } catch (TelegramApiException e) {}
+                    return;
+                }
+
+                long empChatId = Long.parseLong(req[0]);
+                String excelName = req[1];
+                java.time.format.DateTimeFormatter dtf2 = java.time.format.DateTimeFormatter.ofPattern("dd.MM.yyyy");
+                java.time.LocalDate start = java.time.LocalDate.parse(req[2], dtf2);
+                java.time.LocalDate end = java.time.LocalDate.parse(req[3], dtf2);
+                String displayDate = "с " + req[2] + " по " + req[3];
+
+                if (approve) {
+                    java.time.LocalDate current = start;
+                    while (!current.isAfter(end)) {
+                        DatabaseManager.updateSingleShift(excelName, current.getYear(), current.getMonthValue(), current.getDayOfMonth(), "Б", "", "");
+                        current = current.plusDays(1);
+                    }
+                    DatabaseManager.updateSickLeaveRequestStatus(requestId, "APPROVED");
+                    sendDirectNotification(empChatId, "✅ Ваш больничный (" + displayDate + ") подтвержден руководителем и внесен в график.");
+                } else {
+                    DatabaseManager.updateSickLeaveRequestStatus(requestId, "REJECTED");
+                    sendDirectNotification(empChatId, "❌ Ваш больничный (" + displayDate + ") отклонен руководителем. Обратитесь к нему за разъяснением.");
+                }
+
+                EditMessageText edit = new EditMessageText();
+                edit.setChatId(String.valueOf(chatId));
+                edit.setMessageId(update.getCallbackQuery().getMessage().getMessageId());
+                edit.setText((approve ? "✅ Подтверждено: " : "❌ Отклонено: ") + excelName + ", " + displayDate);
+                try { execute(edit); } catch (TelegramApiException e) {}
+
+                try { execute(answer); } catch (TelegramApiException e) {}
+                return;
+            }
+
             if (data.startsWith("UPL_SCHED:") && "ADMIN".equals(role)) {
                 String[] p = data.split(":");
                 fileWaitState.put(chatId, "SCHEDULE:" + p[1] + ":" + p[2]);
@@ -1027,19 +1072,36 @@ public class WarehouseBot extends TelegramLongPollingBot {
                         displayDate = startDate.format(dtf);
                     }
 
-                    // Обновляем базу данных
-                    java.time.LocalDate current = startDate;
-                    while (!current.isAfter(endDate)) {
-                        DatabaseManager.updateSingleShift(excelName, current.getYear(), current.getMonthValue(), current.getDayOfMonth(), "Б", "", "");
-                        current = current.plusDays(1);
-                    }
+                    long days = java.time.temporal.ChronoUnit.DAYS.between(startDate, endDate) + 1;
 
-                    sendMenu(chatId, role, "✅ Ваш больничный (" + displayDate + ") успешно зафиксирован! Выздоравливайте! 💊\n\n<i>Руководитель уведомлен, график обновлен.</i>");
+                    if (days <= 7) {
+                        java.time.LocalDate current = startDate;
+                        while (!current.isAfter(endDate)) {
+                            DatabaseManager.updateSingleShift(excelName, current.getYear(), current.getMonthValue(), current.getDayOfMonth(), "Б", "", "");
+                            current = current.plusDays(1);
+                        }
 
-                    // Авто-уведомление для администраторов
-                    String adminMsg = "🚨 <b>ВНИМАНИЕ: Больничный!</b>\nСотрудник <b>" + excelName + "</b> сообщил о болезни.\nПериод: <b>" + displayDate + "</b>\n<i>Его график автоматически обновлен (статус \"Б\").</i>";
-                    for (Long adminId : DatabaseManager.getAdminIds()) {
-                        sendDirectNotification(adminId, adminMsg);
+                        sendMenu(chatId, role, "✅ Ваш больничный (" + displayDate + ") успешно зафиксирован! Выздоравливайте! 💊\n\n<i>Руководитель уведомлен, график обновлен.</i>");
+
+                        String adminMsg = "🚨 <b>ВНИМАНИЕ: Больничный!</b>\nСотрудник <b>" + excelName + "</b> сообщил о болезни.\nПериод: <b>" + displayDate + "</b>\n<i>Его график автоматически обновлен (статус \"Б\").</i>";
+                        for (Long adminId : DatabaseManager.getAdminIds()) sendDirectNotification(adminId, adminMsg);
+
+                    } else {
+                        long requestId = DatabaseManager.createSickLeaveRequest(chatId, excelName, startDate.format(dtf), endDate.format(dtf));
+
+                        sendMenu(chatId, role, "⏳ Больничный (" + displayDate + ", " + days + " дн.) превышает 7 дней и требует подтверждения руководителя.\n\nВы получите уведомление, как только его согласуют.");
+
+                        String adminMsg = "🚨 <b>Запрос на больничный свыше недели</b>\nСотрудник: <b>" + excelName + "</b>\nПериод: <b>" + displayDate + "</b> (" + days + " дн.)\n\nПодтвердить изменение графика?";
+                        InlineKeyboardMarkup approvalMarkup = new InlineKeyboardMarkup();
+                        approvalMarkup.setKeyboard(List.of(List.of(
+                                createBtn("✅ Подтвердить", "SL_APPROVE:" + requestId),
+                                createBtn("❌ Отклонить", "SL_REJECT:" + requestId)
+                        )));
+                        for (Long adminId : DatabaseManager.getAdminIds()) {
+                            SendMessage msg = new SendMessage(String.valueOf(adminId), adminMsg);
+                            msg.setParseMode("HTML"); msg.setReplyMarkup(approvalMarkup);
+                            try { execute(msg); } catch (TelegramApiException e) {}
+                        }
                     }
 
                 } catch (Exception e) {

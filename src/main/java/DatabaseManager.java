@@ -55,6 +55,17 @@ public class DatabaseManager {
 """);
 
             stmt.execute("""
+    CREATE TABLE IF NOT EXISTS sick_leave_requests (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        chat_id INTEGER NOT NULL,
+        excel_name TEXT NOT NULL,
+        start_date TEXT NOT NULL,
+        end_date TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'PENDING'
+    );
+""");
+
+            stmt.execute("""
                         CREATE TABLE IF NOT EXISTS directory_contacts (
                             id INTEGER PRIMARY KEY AUTOINCREMENT,
                             category INTEGER,
@@ -2645,5 +2656,39 @@ public class DatabaseManager {
             if (rs.next()) return rs.getString("session");
         } catch (SQLException e) { e.printStackTrace(); }
         return null;
+    }
+    public static long createSickLeaveRequest(long chatId, String excelName, String startDate, String endDate) {
+        try (Connection conn = getConnection();
+             PreparedStatement ps = conn.prepareStatement(
+                     "INSERT INTO sick_leave_requests (chat_id, excel_name, start_date, end_date) VALUES (?, ?, ?, ?)",
+                     Statement.RETURN_GENERATED_KEYS)) {
+            ps.setLong(1, chatId); ps.setString(2, excelName); ps.setString(3, startDate); ps.setString(4, endDate);
+            ps.executeUpdate();
+            ResultSet keys = ps.getGeneratedKeys();
+            if (keys.next()) return keys.getLong(1);
+        } catch (SQLException e) { e.printStackTrace(); }
+        return -1;
+    }
+
+    public static String[] getSickLeaveRequest(long id) {
+        try (Connection conn = getConnection();
+             PreparedStatement ps = conn.prepareStatement(
+                     "SELECT chat_id, excel_name, start_date, end_date, status FROM sick_leave_requests WHERE id = ?")) {
+            ps.setLong(1, id);
+            ResultSet rs = ps.executeQuery();
+            if (rs.next()) return new String[]{
+                    String.valueOf(rs.getLong("chat_id")), rs.getString("excel_name"),
+                    rs.getString("start_date"), rs.getString("end_date"), rs.getString("status")
+            };
+        } catch (SQLException e) { e.printStackTrace(); }
+        return null;
+    }
+
+    public static void updateSickLeaveRequestStatus(long id, String status) {
+        try (Connection conn = getConnection();
+             PreparedStatement ps = conn.prepareStatement("UPDATE sick_leave_requests SET status = ? WHERE id = ?")) {
+            ps.setString(1, status); ps.setLong(2, id);
+            ps.executeUpdate();
+        } catch (SQLException e) { e.printStackTrace(); }
     }
 }

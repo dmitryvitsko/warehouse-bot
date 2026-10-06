@@ -404,13 +404,14 @@ public class DatabaseManager {
     }
 
     public static String getWeldersHistoryText() {
+        // Увеличили LIMIT до 30
         String sql = """
                     SELECT datetime(h.action_time, 'localtime') as local_time, w.name, u.full_name, h.action, a.full_name as admin_name
                     FROM welders_history h
                     JOIN welders w ON h.welder_id = w.id
                     JOIN users u ON h.user_id = u.id
                     LEFT JOIN users a ON h.admin_id = a.id
-                    ORDER BY h.action_time DESC LIMIT 20
+                    ORDER BY h.action_time DESC LIMIT 30
                 """;
 
         List<String> lines = new ArrayList<>();
@@ -436,19 +437,24 @@ public class DatabaseManager {
                 String adminName = rs.getString("admin_name");
 
                 String line;
+                // Формируем чистый текст "Светофора"
                 if (action.equals("FORCE_TAKEN") || action.equals("FORCE_RETURNED")) {
                     String adminStr = (adminName != null) ? adminName : "Админ";
                     if (action.equals("FORCE_TAKEN")) {
-                        line = String.format("▫️ `[%s]` 👑 <b>%s</b> принудительно выдал <b>%s</b> ➔ %s",
+                        line = String.format("🔴 `[%s]` <b>%s</b> выдал <i>%s</i> ➔ <b>%s</b>",
                                 formattedTime, adminStr, welderName, userName);
                     } else {
-                        line = String.format("▫️ `[%s]` 👑 <b>%s</b> принудительно списал <b>%s</b> у %s",
+                        line = String.format("🟢 `[%s]` <b>%s</b> списал <i>%s</i> у <b>%s</b>",
                                 formattedTime, adminStr, welderName, userName);
                     }
                 } else {
-                    String actionRu = action.equals("TAKEN") ? "взял" : "вернул";
-                    line = String.format("▫️ `[%s]` 👷‍♂️ %s %s <b>%s</b>",
-                            formattedTime, userName, actionRu, welderName);
+                    if (action.equals("TAKEN")) {
+                        line = String.format("🔴 `[%s]` <b>%s</b> взял <i>%s</i>",
+                                formattedTime, userName, welderName);
+                    } else {
+                        line = String.format("🟢 `[%s]` <b>%s</b> вернул <i>%s</i>",
+                                formattedTime, userName, welderName);
+                    }
                 }
 
                 lines.add(line);
@@ -464,12 +470,13 @@ public class DatabaseManager {
         // ПЕРЕВОРАЧИВАЕМ СПИСОК (старые записи сверху, самые новые снизу)
         Collections.reverse(lines);
 
-        StringBuilder sb = new StringBuilder("📜 <b>История движения аппаратов</b>\n<i>(показаны последние 20 событий)</i>\n\n");
+        // Убрали лишнюю приписку и оставили только заголовок
+        StringBuilder sb = new StringBuilder("📜 <b>История движения аппаратов (30 записей):</b>\n\n");
         for (String l : lines) {
-            sb.append(l).append("\n");
+            sb.append(l).append("\n\n"); // Двойной перенос для "воздуха" между записями
         }
 
-        return sb.toString();
+        return sb.toString().trim(); // Убираем отступ в самом конце списка
     }
 
     public static String getWelderNameById(int id) {
@@ -1390,7 +1397,7 @@ public class DatabaseManager {
     }
 
     public static String getShiftPartners(String excelName) {
-        StringBuilder sb = new StringBuilder("🤝 <b>Ваши напарники по вторым сменам и субботам (текущий месяц):</b>\n\n");
+        StringBuilder sb = new StringBuilder("🤝 <b>Ваши напарники (текущий месяц):</b>\n\n");
         try (Connection conn = getConnection()) {
             // Берем текущий месяц
             java.time.LocalDate now = java.time.LocalDate.now();
@@ -1451,31 +1458,51 @@ public class DatabaseManager {
                             if (r < minRank) minRank = r;
                         }
 
-                        List<String> leaderLines = new ArrayList<>();
-                        List<String> normalLines = new ArrayList<>();
+                        List<String> formattedPartners = new ArrayList<>();
                         boolean iAmSenior = false;
 
+                        // 1. Сначала добавляем в список старших (чтобы они всегда были первыми)
                         for (String w : allWorkersThisShift) {
                             if (w.equals(excelName)) {
                                 if (getSeniorityRank(w) == minRank && minRank != 99) iAmSenior = true;
                                 continue;
                             }
-                            if (getSeniorityRank(w) == minRank && minRank != 99)
-                                leaderLines.add(" • <b>" + w + " (Старший смены)</b>");
-                            else normalLines.add(" • " + w);
+                            if (getSeniorityRank(w) == minRank && minRank != 99) {
+                                formattedPartners.add("👑 <b>" + w + "</b>");
+                            }
+                        }
+
+                        // 2. Затем добавляем обычных напарников
+                        for (String w : allWorkersThisShift) {
+                            if (w.equals(excelName)) continue;
+                            if (!(getSeniorityRank(w) == minRank && minRank != 99)) {
+                                formattedPartners.add(w);
+                            }
                         }
 
                         String dayOfWeekRu = getDayOfWeekRu(currentYear, currentMonth, dayNum);
-                        String headerPrefix = isSaturday ? String.format("📅 <b>%02d.%02d (%s)</b>", dayNum, currentMonth, dayOfWeekRu) : String.format("📅 <b>%02d.%02d (%s) — Вторая смена</b>", dayNum, currentMonth, dayOfWeekRu);
-                        if (iAmSenior) headerPrefix += "  👑 <i>(Вы старший смены!)</i>";
+                        String shiftName = isSaturday ? "Рабочая суббота" : "Вторая смена";
+                        String headerPrefix = String.format("🔹 <b>%02d.%02d (%s) | %s</b>", dayNum, currentMonth, dayOfWeekRu, shiftName);
 
-                        sb.append(headerPrefix).append("\n");
-                        sb.append(isSaturday ? "С вами работают:\n" : "С вами во второй смене:\n");
+                        // Если сам пользователь — старший смены
+                        if (iAmSenior) headerPrefix += "  👑 <i>(Вы — старший смены!)</i>";
 
-                        if (leaderLines.isEmpty() && normalLines.isEmpty()) sb.append(" <i>(Никого не найдено)</i>\n");
-                        else {
-                            for (String line : leaderLines) sb.append(line).append("\n");
-                            for (String line : normalLines) sb.append(line).append("\n");
+                        sb.append(headerPrefix).append("\n\n");
+
+                        if (formattedPartners.isEmpty()) {
+                            sb.append(" ▪ <i>(Никого не найдено)</i>\n");
+                        } else {
+                            // 3. Выводим список в две колонки
+                            for (int i = 0; i < formattedPartners.size(); i += 2) {
+                                String p1 = formattedPartners.get(i);
+                                if (i + 1 < formattedPartners.size()) {
+                                    String p2 = formattedPartners.get(i + 1);
+                                    // 4 пробела для визуального разделения колонок
+                                    sb.append("▪ ").append(p1).append("    ▪ ").append(p2).append("\n");
+                                } else {
+                                    sb.append("▪ ").append(p1).append("\n");
+                                }
+                            }
                         }
                         sb.append("\n");
                     }
@@ -1486,7 +1513,7 @@ public class DatabaseManager {
             e.printStackTrace();
             return "❌ Ошибка при поиске напарников.";
         }
-        return sb.toString();
+        return sb.toString().trim(); // Обрезаем последний лишний перенос строки
     }
 
     private static int getSeniorityRank(String excelName) {
@@ -2718,5 +2745,38 @@ public class DatabaseManager {
             ps.setString(1, status); ps.setLong(2, id);
             ps.executeUpdate();
         } catch (SQLException e) { e.printStackTrace(); }
+    }
+    // Универсальный метод для исправления имени сотрудника во всей БД
+    public static String fixNameTypo(String oldName, String newName) {
+        try (Connection conn = getConnection()) {
+            conn.setAutoCommit(false);
+
+            // 1. Главная таблица пользователей
+            try (PreparedStatement ps = conn.prepareStatement("UPDATE users SET full_name = ? WHERE full_name = ?")) {
+                ps.setString(1, newName); ps.setString(2, oldName); ps.executeUpdate();
+            }
+            // 2. Таблица привязок Telegram <-> Excel
+            try (PreparedStatement ps = conn.prepareStatement("UPDATE user_excel_names SET excel_name = ? WHERE excel_name = ?")) {
+                ps.setString(1, newName); ps.setString(2, oldName); ps.executeUpdate();
+            }
+            // 3. Графики (новые)
+            try (PreparedStatement ps = conn.prepareStatement("UPDATE schedules_v2 SET excel_name = ? WHERE excel_name = ?")) {
+                ps.setString(1, newName); ps.setString(2, oldName); ps.executeUpdate();
+            }
+            // 4. Графики (старые)
+            try (PreparedStatement ps = conn.prepareStatement("UPDATE schedules SET excel_name = ? WHERE excel_name = ?")) {
+                ps.setString(1, newName); ps.setString(2, oldName); ps.executeUpdate();
+            }
+            // 5. Заявки на отпуска/больничные
+            try (PreparedStatement ps = conn.prepareStatement("UPDATE sick_leave_requests SET excel_name = ? WHERE excel_name = ?")) {
+                ps.setString(1, newName); ps.setString(2, oldName); ps.executeUpdate();
+            }
+
+            conn.commit();
+            return "✅ Все записи с именем <b>" + oldName + "</b> успешно заменены на <b>" + newName + "</b>!";
+        } catch (SQLException e) {
+            e.printStackTrace();
+            return "❌ Ошибка базы данных при замене имени: " + e.getMessage();
+        }
     }
 }

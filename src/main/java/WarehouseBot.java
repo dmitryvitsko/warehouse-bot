@@ -4,6 +4,7 @@ import org.telegram.telegrambots.meta.api.methods.AnswerCallbackQuery;
 import org.telegram.telegrambots.meta.api.methods.GetFile;
 import org.telegram.telegrambots.meta.api.methods.send.SendDocument;
 import org.telegram.telegrambots.meta.api.methods.send.SendMessage;
+import org.telegram.telegrambots.meta.api.methods.updatingmessages.EditMessageText;
 import org.telegram.telegrambots.meta.api.objects.Document;
 import org.telegram.telegrambots.meta.api.objects.InputFile;
 import org.telegram.telegrambots.meta.api.objects.Update;
@@ -41,6 +42,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
     private final Map<Long, String> tmAuthStep = new HashMap<>();
     private final Map<Long, String> waitingTmReportTaskId = new HashMap<>();
     private final Map<Long, String> tmTempLogin = new HashMap<>();
+    private final Map<Integer, String> tmOriginalCardText = new HashMap<>(); // messageId -> исходный текст карточки заявки
 
     // Для карманного редактора смен
     private final Map<Long, String> waitingScheduleEditUser = new HashMap<>();
@@ -462,8 +464,9 @@ public class WarehouseBot extends TelegramLongPollingBot {
             if (data.startsWith("TM_ASTUP:")) {
                 if (!"ADMIN".equals(role)) return;
                 String taskId = data.substring("TM_ASTUP:".length());
+                int messageId = update.getCallbackQuery().getMessage().getMessageId();
                 var astup = tmCallWithRetry(chatId, s -> TmClient.getAstup(s, taskId));
-                sendMenu(chatId, role, TmClient.formatAstup(astup));
+                editTmCardMessage(chatId, messageId, TmClient.formatAstup(astup), backButtonMarkup(taskId));
                 AnswerCallbackQuery answer = new AnswerCallbackQuery();
                 answer.setCallbackQueryId(update.getCallbackQuery().getId());
                 try { execute(answer); } catch (TelegramApiException e) {}
@@ -472,8 +475,27 @@ public class WarehouseBot extends TelegramLongPollingBot {
             if (data.startsWith("TM_PARAMS:")) {
                 if (!"ADMIN".equals(role)) return;
                 String taskId = data.substring("TM_PARAMS:".length());
+                int messageId = update.getCallbackQuery().getMessage().getMessageId();
                 var params = tmCallWithRetry(chatId, s -> TmClient.measureParams(s, taskId));
-                sendMenu(chatId, role, TmClient.formatParams(params));
+                editTmCardMessage(chatId, messageId, TmClient.formatParams(params), backButtonMarkup(taskId));
+                AnswerCallbackQuery answer = new AnswerCallbackQuery();
+                answer.setCallbackQueryId(update.getCallbackQuery().getId());
+                try { execute(answer); } catch (TelegramApiException e) {}
+                return;
+            }
+            if (data.startsWith("TM_BACK:")) {
+                if (!"ADMIN".equals(role)) return;
+                String taskId = data.substring("TM_BACK:".length());
+                int messageId = update.getCallbackQuery().getMessage().getMessageId();
+                String originalText = tmOriginalCardText.get(messageId);
+                if (originalText != null) {
+                    InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
+                    markup.setKeyboard(List.of(
+                            List.of(createBtn("📝 Отправить отчёт", "TM_REPORT:" + taskId)),
+                            List.of(createBtn("📍 АСТУП", "TM_ASTUP:" + taskId), createBtn("📊 Параметры", "TM_PARAMS:" + taskId))
+                    ));
+                    editTmCardMessage(chatId, messageId, originalText, markup);
+                }
                 AnswerCallbackQuery answer = new AnswerCallbackQuery();
                 answer.setCallbackQueryId(update.getCallbackQuery().getId());
                 try { execute(answer); } catch (TelegramApiException e) {}
@@ -1644,6 +1666,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
         for (int i = 0; i < inProgress.length(); i++) {
             var task = inProgress.getJSONObject(i);
             String taskId = task.optString("id");
+            String cardText = TmClient.formatTask(task);
 
             InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
             markup.setKeyboard(List.of(
@@ -1651,11 +1674,30 @@ public class WarehouseBot extends TelegramLongPollingBot {
                     List.of(createBtn("📍 АСТУП", "TM_ASTUP:" + taskId), createBtn("📊 Параметры", "TM_PARAMS:" + taskId))
             ));
 
-            SendMessage msg = new SendMessage(String.valueOf(chatId), TmClient.formatTask(task));
+            SendMessage msg = new SendMessage(String.valueOf(chatId), cardText);
             msg.setParseMode("HTML");
             msg.setReplyMarkup(markup);
-            try { execute(msg); } catch (TelegramApiException e) {}
+            try {
+                var sent = execute(msg);
+                tmOriginalCardText.put(sent.getMessageId(), cardText);
+            } catch (TelegramApiException e) {}
         }
+    }
+
+    private void editTmCardMessage(long chatId, int messageId, String newText, InlineKeyboardMarkup markup) {
+        EditMessageText edit = new EditMessageText();
+        edit.setChatId(String.valueOf(chatId));
+        edit.setMessageId(messageId);
+        edit.setText(newText);
+        edit.setParseMode("HTML");
+        edit.setReplyMarkup(markup);
+        try { execute(edit); } catch (TelegramApiException e) {}
+    }
+
+    private InlineKeyboardMarkup backButtonMarkup(String taskId) {
+        InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
+        markup.setKeyboard(List.of(List.of(createBtn("⬅ Назад к заявке", "TM_BACK:" + taskId))));
+        return markup;
     }
 
     private void sendPendingOrshList(long chatId) {

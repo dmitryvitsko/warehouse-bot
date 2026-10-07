@@ -1855,7 +1855,15 @@ public class DatabaseManager {
             int counter = 1;
             while (rs.next()) {
                 hasTools = true;
-                sb.append(String.format("%d. <b>%s</b> (Инв. №: <code>%s</code>)\n", counter++, rs.getString("name"), rs.getString("inv_number")));
+                String name = rs.getString("name");
+                String invNum = rs.getString("inv_number");
+
+                // Формируем красивую строку [Инвентарный] Название
+                String displayName = (invNum != null && !invNum.isEmpty() && !invNum.equals("null"))
+                        ? "[" + invNum + "] " + name
+                        : name;
+
+                sb.append(String.format("%d. <b>%s</b>\n", counter++, displayName));
             }
         } catch (SQLException e) {
             e.printStackTrace();
@@ -1866,85 +1874,83 @@ public class DatabaseManager {
     public static String getToolsAuditText() {
         StringBuilder sb = new StringBuilder("📊 <b>Аудит инструмента:</b>\n\n");
 
+        // Вспомогательный класс для группировки
+        class ToolGroup {
+            int total = 0;
+            int inStock = 0;
+            int assigned = 0;
+            List<String> inStockLines = new ArrayList<>();
+            List<String> assignedLines = new ArrayList<>();
+        }
+
         try (Connection conn = getConnection(); Statement stmt = conn.createStatement()) {
 
-            ResultSet rsTotal = stmt.executeQuery(
-                    "SELECT COUNT(*) as total, SUM(CASE WHEN status = 'IN_STOCK' THEN 1 ELSE 0 END) as avail FROM tools WHERE status != 'WRITTEN_OFF'"
-            );
-            if (rsTotal.next()) {
-                int totalTools = rsTotal.getInt("total");
-                int availTools = rsTotal.getInt("avail");
-                sb.append("🏢 <b>Всего числится инструмента:</b> ").append(totalTools).append(" шт.\n");
-                sb.append("📦 <b>Из них ждет на складе:</b> ").append(availTools).append(" шт.\n\n");
-                sb.append("➖➖➖➖➖➖➖➖➖➖\n\n");
-            }
-
-            Map<String, int[]> statsMap = new java.util.LinkedHashMap<>();
-            // 0: first_id, 1: t_count, 2: a_count, 3: h_count
-            ResultSet rsStats = stmt.executeQuery(
-                    "SELECT MIN(id) as first_id, name, COUNT(*) as t_count, " +
-                            "SUM(CASE WHEN status = 'IN_STOCK' THEN 1 ELSE 0 END) as a_count, " +
-                            "SUM(CASE WHEN status = 'ASSIGNED' THEN 1 ELSE 0 END) as h_count " +
-                            "FROM tools WHERE status != 'WRITTEN_OFF' GROUP BY name ORDER BY name"
-            );
-            while (rsStats.next()) {
-                statsMap.put(rsStats.getString("name"), new int[]{
-                        rsStats.getInt("first_id"),
-                        rsStats.getInt("t_count"),
-                        rsStats.getInt("a_count"),
-                        rsStats.getInt("h_count")
-                });
-            }
-
+            // Запрашиваем абсолютно ВЕСЬ инструмент (и на складе, и на руках) одним запросом
             String sql = """
-                        SELECT t.id as tool_id, t.name as tool_name, 
-                               u.full_name as worker_name, 
-                               t.inv_number
+                        SELECT t.id as tool_id, t.name as tool_name, t.status, 
+                               u.full_name as worker_name, t.inv_number
                         FROM tools t
-                        JOIN users u ON t.assigned_to = u.id
-                        WHERE t.status = 'ASSIGNED'
-                        ORDER BY worker_name
+                        LEFT JOIN users u ON t.assigned_to = u.id
+                        WHERE t.status != 'WRITTEN_OFF'
+                        ORDER BY t.name, t.inv_number
                     """;
-            ResultSet rsAssigned = stmt.executeQuery(sql);
 
-            Map<String, List<String>> workersMap = new java.util.HashMap<>();
-            while (rsAssigned.next()) {
-                String toolName = rsAssigned.getString("tool_name");
-                String workerName = rsAssigned.getString("worker_name");
-                String invNum = rsAssigned.getString("inv_number");
-                int toolId = rsAssigned.getInt("tool_id");
+            ResultSet rs = stmt.executeQuery(sql);
+            Map<String, ToolGroup> groups = new java.util.LinkedHashMap<>();
 
-                String displayLine = "   ✅ <b>" + workerName + "</b>";
-                if (invNum != null && !invNum.isEmpty() && !invNum.equals("null")) {
-                    displayLine += " (инв: " + invNum + ")";
+            int overallTotal = 0;
+            int overallInStock = 0;
+
+            // Распределяем всё по группам
+            while (rs.next()) {
+                String toolName = rs.getString("tool_name");
+                String status = rs.getString("status");
+                String invNum = rs.getString("inv_number");
+                int toolId = rs.getInt("tool_id");
+                String workerName = rs.getString("worker_name");
+
+                ToolGroup g = groups.computeIfAbsent(toolName, k -> new ToolGroup());
+                g.total++;
+                overallTotal++;
+
+                // Форматируем инвентарный номер [12345]
+                String formatInv = (invNum != null && !invNum.isEmpty() && !invNum.equals("null")) ? "[" + invNum + "] " : "";
+
+                if ("IN_STOCK".equals(status)) {
+                    g.inStock++;
+                    overallInStock++;
+                    g.inStockLines.add("   📦 <b>На складе</b> 👉 " + formatInv + toolName + " (/give_" + toolId + ")");
+                } else if ("ASSIGNED".equals(status)) {
+                    g.assigned++;
+                    g.assignedLines.add("   ✅ <b>" + workerName + "</b> 👉 " + formatInv + toolName + " (/take_" + toolId + ")");
                 }
-                displayLine += " 👉 /take_" + toolId;
-
-                workersMap.computeIfAbsent(toolName, k -> new ArrayList<>()).add(displayLine);
             }
 
-            if (statsMap.isEmpty()) {
+            // Выводим шапку
+            sb.append("🏢 <b>Всего числится инструмента:</b> ").append(overallTotal).append(" шт.\n");
+            sb.append("📦 <b>Из них ждет на складе:</b> ").append(overallInStock).append(" шт.\n\n");
+            sb.append("➖➖➖➖➖➖➖➖➖➖\n\n");
+
+            if (groups.isEmpty()) {
                 sb.append("<i>База инструмента пока пуста. Загрузите файл Excel.</i>");
             } else {
-                for (Map.Entry<String, int[]> entry : statsMap.entrySet()) {
+                // Выводим каждую группу
+                for (Map.Entry<String, ToolGroup> entry : groups.entrySet()) {
                     String toolName = entry.getKey();
-                    int[] counts = entry.getValue();
+                    ToolGroup g = entry.getValue();
 
-                    sb.append("🔧 <b>").append(toolName).append("</b>");
-                    if (counts[2] > 0) {
-                        sb.append(" 👉 /give_").append(counts[0]);
+                    sb.append("🔧 <b>").append(toolName).append("</b>\n");
+                    sb.append("   <i>Всего: ").append(g.total)
+                            .append(" | На складе: ").append(g.inStock)
+                            .append(" | На руках: ").append(g.assigned).append("</i>\n");
+
+                    // Сначала выводим всё, что есть на складе
+                    for (String line : g.inStockLines) {
+                        sb.append(line).append("\n");
                     }
-                    sb.append("\n");
-
-                    sb.append("   <i>Всего: ").append(counts[1])
-                            .append(" | На складе: ").append(counts[2])
-                            .append(" | На руках: ").append(counts[3]).append("</i>\n");
-
-                    if (counts[3] > 0) {
-                        List<String> workers = workersMap.getOrDefault(toolName, new ArrayList<>());
-                        for (String line : workers) {
-                            sb.append(line).append("\n");
-                        }
+                    // Затем всё, что выдано на руки
+                    for (String line : g.assignedLines) {
+                        sb.append(line).append("\n");
                     }
                     sb.append("\n");
                 }
@@ -2778,5 +2784,55 @@ public class DatabaseManager {
             e.printStackTrace();
             return "❌ Ошибка базы данных при замене имени: " + e.getMessage();
         }
+    }
+    // Метод для умного поиска инструмента (полностью нечувствителен к регистру)
+    public static String searchTools(String searchQuery) {
+        StringBuilder sb = new StringBuilder("🔍 <b>Результаты поиска по запросу «" + searchQuery + "»:</b>\n\n");
+        boolean found = false;
+
+        // Переводим поисковый запрос в нижний регистр средствами Java
+        String searchLower = searchQuery.toLowerCase();
+
+        // Достаем вообще весь инструмент (без условия поиска)
+        String sql = """
+                    SELECT t.id, t.name, t.status, u.full_name as worker_name, t.inv_number 
+                    FROM tools t 
+                    LEFT JOIN users u ON t.assigned_to = u.id 
+                    WHERE t.status != 'WRITTEN_OFF' 
+                    ORDER BY t.status DESC, t.name
+                """;
+
+        try (Connection conn = getConnection(); PreparedStatement ps = conn.prepareStatement(sql)) {
+            ResultSet rs = ps.executeQuery();
+
+            while (rs.next()) {
+                String toolName = rs.getString("name");
+                String invNum = rs.getString("inv_number");
+
+                // Проверяем совпадение в Java (игнорируя размер букв)
+                boolean matchName = toolName != null && toolName.toLowerCase().contains(searchLower);
+                boolean matchInv = invNum != null && invNum.toLowerCase().contains(searchLower);
+
+                if (matchName || matchInv) {
+                    found = true;
+                    int toolId = rs.getInt("id");
+                    String status = rs.getString("status");
+                    String workerName = rs.getString("worker_name");
+
+                    String formatInv = (invNum != null && !invNum.isEmpty() && !invNum.equals("null")) ? "[" + invNum + "] " : "";
+
+                    if ("IN_STOCK".equals(status)) {
+                        sb.append("📦 <b>На складе</b> 👉 ").append(formatInv).append(toolName).append(" (/give_").append(toolId).append(")\n\n");
+                    } else if ("ASSIGNED".equals(status)) {
+                        sb.append("✅ <b>").append(workerName).append("</b> 👉 ").append(formatInv).append(toolName).append(" (/take_").append(toolId).append(")\n\n");
+                    }
+                }
+            }
+        } catch (SQLException e) {
+            e.printStackTrace();
+            return "❌ Ошибка при поиске инструмента.";
+        }
+
+        return found ? sb.toString().trim() : null;
     }
 }

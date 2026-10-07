@@ -66,6 +66,10 @@ public class Main {
                             if (bot.getForceWelderReturnIds().containsKey(userId)) {
                                 continue;
                             }
+                            // Если пользователь УЖЕ нажал "Оставить на завтра" именно сегодня - не трогаем его
+                            if (today.equals(bot.getKeptWelderForTomorrow().get(userId))) {
+                                continue;
+                            }
 
                             // Узнаем окончание смены для этого человека на СЕГОДНЯ из актуальной таблицы schedules_v2
                             String schedSql = "SELECT end_time FROM schedules_v2 WHERE excel_name = ? AND year = ? AND month = ? AND day = ?";

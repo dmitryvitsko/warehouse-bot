@@ -1,6 +1,8 @@
 import org.json.JSONArray;
 import org.json.JSONObject;
 
+import java.io.FileInputStream;
+import java.io.IOException;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -10,14 +12,26 @@ import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Properties;
 
 /**
- * Клиент для API "Мобильная ТМ" (mtm.beltelecom.by).
- * Один эндпоинт /7/index.php, метод передаётся в теле запроса (поле "method").
+ * Клиент для API "Мобильная ТМ".
+ * Один эндпоинт, метод передаётся в теле запроса (поле "method").
  */
 public class TmClient {
 
-    private static final String BASE_URL = "https://mtm.beltelecom.by/7/index.php";
+    private static final Properties config = new Properties();
+    static {
+        try (FileInputStream fis = new FileInputStream("config.properties")) {
+            config.load(fis);
+        } catch (IOException e) {
+            throw new RuntimeException("❌ Ошибка: не найден файл config.properties для TmClient!", e);
+        }
+    }
+
+    // Загружаем только URL сервера из файла настроек
+    private static final String BASE_URL = config.getProperty("tm.api.url");
+
     private static final HttpClient HTTP = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(10))
             .build();
@@ -29,8 +43,11 @@ public class TmClient {
     public static String login(String username, String password) {
         JSONObject params = new JSONObject();
         params.put("session", "");
-        params.put("task", "h-rep-2265");
+
+        // Передаем логин сотрудника в оба поля (так требует сервер Белтелекома)
+        params.put("task", username);
         params.put("username", username);
+
         params.put("password", password);
         params.put("version_name", "5.6.8");
         params.put("device", "WarehouseBot");
@@ -48,6 +65,10 @@ public class TmClient {
 
         return result.optString("session", null);
     }
+
+    // ... дальше идут остальные методы (getTasks, countByStatus и т.д.), их не трогаем!
+
+// ... остальной код остается без изменений ...
 
     /**
      * Список заявок текущей сессии. Возвращает null, если сессия протухла

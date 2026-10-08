@@ -2400,7 +2400,6 @@ public class DatabaseManager {
         return list;
     }
 
-    // Метод: Изъять ВЕСЬ инструмент у конкретного сотрудника (Магическая кнопка)
     public static String returnAllUserToolsToWarehouse(long userId) {
         try (Connection conn = getConnection()) {
             PreparedStatement psName = conn.prepareStatement("SELECT full_name FROM users WHERE id = ?");

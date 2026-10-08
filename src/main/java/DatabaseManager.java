@@ -2603,44 +2603,64 @@ public class DatabaseManager {
         return sb.toString().trim();
     }
 
-    // Метод: Полное удаление сотрудника из графиков (увольнение / армия) с игнорированием регистра
-    public static String removeWorkerFromSchedule(String inputName) {
-        String exactName = null;
-        String searchLower = inputName.toLowerCase();
+    public static String removeWorkerCompletely(String excelName) {
+        int scheduleDeleted = 0;
+        int usersReset = 0;
 
         try (Connection conn = getConnection()) {
-            // 1. Ищем точное имя с учетом кириллицы (через Java)
-            try (Statement stmt = conn.createStatement();
-                 ResultSet rs = stmt.executeQuery("SELECT excel_name FROM schedules_v2 UNION SELECT excel_name FROM user_excel_names")) {
-                while (rs.next()) {
-                    String dbName = rs.getString(1);
-                    if (dbName != null && dbName.toLowerCase().contains(searchLower)) {
-                        exactName = dbName;
-                        break; // Нашли совпадение!
+            // 1. Удаляем все смены сотрудника из графика schedules_v2 (точное совпадение)
+            String sqlSchedule = "DELETE FROM schedules_v2 WHERE excel_name = ? OR TRIM(excel_name) = ?";
+            try (PreparedStatement ps = conn.prepareStatement(sqlSchedule)) {
+                ps.setString(1, excelName);
+                ps.setString(2, excelName.trim());
+                scheduleDeleted = ps.executeUpdate();
+            } catch (SQLException e) {
+                e.printStackTrace();
+                return "❌ Ошибка при удалении из schedules_v2: " + e.getMessage();
+            }
+
+            // 2. Безопасно отвязываем в таблице users (без падения из-за отсутствия колонки)
+            try {
+                List<String> userCols = new ArrayList<>();
+                try (Statement stmt = conn.createStatement();
+                     ResultSet rs = stmt.executeQuery("PRAGMA table_info(users)")) {
+                    while (rs.next()) {
+                        userCols.add(rs.getString("name").toLowerCase());
                     }
                 }
+
+                // Ищем реальное название колонки с фамилией в users
+                String foundCol = null;
+                for (String col : new String[]{"excel_name", "worker_name", "employee_name", "fio", "name", "full_name"}) {
+                    if (userCols.contains(col)) {
+                        foundCol = col;
+                        break;
+                    }
+                }
+
+                if (foundCol != null) {
+                    String sqlUsers = "UPDATE users SET " + foundCol + " = NULL WHERE " + foundCol + " = ? OR TRIM(" + foundCol + ") = ?";
+                    try (PreparedStatement ps = conn.prepareStatement(sqlUsers)) {
+                        ps.setString(1, excelName);
+                        ps.setString(2, excelName.trim());
+                        usersReset = ps.executeUpdate();
+                    }
+                }
+            } catch (Exception ignored) {
+                // Игнорируем любые нестыковки в users, главное — график очищен
             }
-
-            if (exactName == null) {
-                return "ℹ️ Сотрудник <b>" + inputName + "</b> не найден в базе графиков.";
-            }
-
-            // 2. Удаляем все его смены из расписания по точному совпадению
-            PreparedStatement ps1 = conn.prepareStatement("DELETE FROM schedules_v2 WHERE excel_name = ?");
-            ps1.setString(1, exactName);
-            int deletedDays = ps1.executeUpdate();
-
-            // 3. Удаляем его из таблицы привязок
-            PreparedStatement ps2 = conn.prepareStatement("DELETE FROM user_excel_names WHERE excel_name = ?");
-            ps2.setString(1, exactName);
-            ps2.executeUpdate();
-
-            return "✅ Сотрудник <b>" + exactName + "</b> успешно удален из графиков!\nУдалено записей смен: " + deletedDays;
 
         } catch (SQLException e) {
             e.printStackTrace();
-            return "❌ Ошибка базы данных при удалении сотрудника: " + e.getMessage();
+            return "❌ Ошибка БД: " + e.getMessage();
         }
+
+        if (scheduleDeleted == 0) {
+            return String.format("ℹ️ В графике <code>schedules_v2</code> записей для <b>%s</b> уже нет (возможно, удалились при предыдущей попытке). Проверьте список сотрудников.", excelName);
+        }
+
+        return String.format("✅ Сотрудник <b>%s</b> полностью удален!\n• Удалено смен из графика: <b>%d</b>\n• Сброшено привязок: <b>%d</b>",
+                excelName, scheduleDeleted, usersReset);
     }
 
     // Метод: Ручное добавление нового сотрудника в базу

@@ -318,9 +318,46 @@ public class DatabaseManager {
         }
     }
 
-    // =========================================================================
-    // СУПЕР-МОДУЛЬ: КОНТРОЛЬ СВАРОЧНЫХ АППАРАТОВ
-    // =========================================================================
+    public static boolean transferWelder(int welderId, long fromUserId, long toUserId) {
+        String sqlUpdate = "UPDATE welders SET assigned_to = ?, assigned_time = datetime('now', 'localtime') WHERE id = ?";
+        String sqlHistRet = "INSERT INTO welders_history (welder_id, user_id, action) VALUES (?, ?, 'RETURNED')";
+        String sqlHistTake = "INSERT INTO welders_history (welder_id, user_id, action) VALUES (?, ?, 'TAKEN')";
+
+        try (Connection conn = getConnection()) {
+            conn.setAutoCommit(false);
+            try (PreparedStatement psUpd = conn.prepareStatement(sqlUpdate);
+                 PreparedStatement psRet = conn.prepareStatement(sqlHistRet);
+                 PreparedStatement psTake = conn.prepareStatement(sqlHistTake)) {
+
+                psUpd.setLong(1, toUserId);
+                psUpd.setInt(2, welderId);
+                int affected = psUpd.executeUpdate();
+
+                if (affected > 0) {
+                    psRet.setInt(1, welderId);
+                    psRet.setLong(2, fromUserId);
+                    psRet.executeUpdate();
+
+                    psTake.setInt(1, welderId);
+                    psTake.setLong(2, toUserId);
+                    psTake.executeUpdate();
+
+                    conn.commit();
+                    return true;
+                } else {
+                    conn.rollback();
+                }
+            } catch (SQLException ex) {
+                conn.rollback();
+                ex.printStackTrace();
+            } finally {
+                conn.setAutoCommit(true);
+            }
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
+        return false;
+    }
 
     public static boolean takeWelder(int welderId, long userId, Long adminId) {
         String sqlUpdate = "UPDATE welders SET status = 'IN_USE', assigned_to = ?, assigned_time = datetime('now', 'localtime') WHERE id = ? AND status = 'ON_BASE'";
@@ -2886,28 +2923,5 @@ public class DatabaseManager {
 
         return found ? sb.toString().trim() : null;
     }
-    public static String transferWelder(int welderId, long fromUserId, long toUserId) {
-        String fromName = getUserFullName(fromUserId);
-        String toName = getUserFullName(toUserId);
 
-        // Предполагаемые названия колонок взяты по аналогии с вашим кодом
-        try (Connection conn = getConnection();
-             PreparedStatement ps1 = conn.prepareStatement("UPDATE welders SET assigned_to_user_id = ?, status = 'IN_USE' WHERE id = ?");
-             PreparedStatement ps2 = conn.prepareStatement("INSERT INTO welders_log (welder_id, action, user_id, action_time, details) VALUES (?, 'TRANSFER', ?, NOW(), ?)")) {
-
-            ps1.setLong(1, toUserId);
-            ps1.setInt(2, welderId);
-            ps1.executeUpdate();
-
-            ps2.setInt(1, welderId);
-            ps2.setLong(2, toUserId);
-            ps2.setString(3, "Передан напрямую: " + fromName + " ➔ " + toName);
-            ps2.executeUpdate();
-
-            return "OK";
-        } catch (Exception e) {
-            e.printStackTrace();
-            return "ERROR";
-        }
-    }
 }

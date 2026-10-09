@@ -2236,7 +2236,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
             }
             if (data.startsWith("W_TAKE:")) {
                 int welderId = Integer.parseInt(data.split(":")[1]);
-                if (DatabaseManager.takeWelder(welderId, chatId, null)) {
+                if (DatabaseManager.takeWelder(welderId, chatId, (Long) null)) {
                     if (chatId != DatabaseManager.ADMIN_ID) {
                         sendDirectNotification(DatabaseManager.ADMIN_ID, "ℹ️ <b>Сварочный аппарат взят!</b>\n👷‍♂ " + DatabaseManager.getUserFullName(chatId) + " взял аппарат <b>" + DatabaseManager.getWelderNameById(welderId) + "</b>.");
                     }
@@ -2325,8 +2325,16 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 PendingWelderTransfer pt = pendingWelderTransfers.remove(chatId);
                 activeSenderTransfers.remove(senderId);
 
-                // Запись в БД
-                DatabaseManager.transferWelder(welderId, senderId, chatId);
+                // Запись в БД с проверкой успеха
+                boolean success = DatabaseManager.transferWelder(welderId, senderId, chatId);
+                if (!success) {
+                    AnswerCallbackQuery ans = new AnswerCallbackQuery();
+                    ans.setCallbackQueryId(update.getCallbackQuery().getId());
+                    ans.setText("❌ Ошибка базы данных! Сварочник не передан.");
+                    ans.setShowAlert(true);
+                    try { execute(ans); } catch (Exception e) {}
+                    return;
+                }
 
                 // Окно принимающего
                 EditMessageText edit = new EditMessageText();
@@ -2384,7 +2392,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 String[] parts = data.split(":");
                 int welderId = Integer.parseInt(parts[1]);
                 long targetUserId = Long.parseLong(parts[2]);
-                if (DatabaseManager.takeWelder(welderId, targetUserId, chatId)) {
+                if (DatabaseManager.takeWelder(welderId, targetUserId, Long.valueOf(chatId))) {
                     sendDirectNotification(targetUserId, "🔔 <b>Администратор выдал вам сварочный аппарат!</b>\nЗа вами закреплен: <b>" + DatabaseManager.getWelderNameById(welderId) + "</b>");
                     sendWeldersMenu(chatId, role, messageId, "Аппарат " + DatabaseManager.getWelderNameById(welderId) + " принудительно выдан.");
                 }

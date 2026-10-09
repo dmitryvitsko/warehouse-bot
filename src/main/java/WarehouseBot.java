@@ -2181,8 +2181,15 @@ public class WarehouseBot extends TelegramLongPollingBot {
 
             if (data.startsWith("ED_SCH_U:") && canEditSchedule(chatId, role)) {
                 String excelName = data.substring(9);
-                waitingScheduleEditUser.put(chatId, excelName);
-                sendCancelKeyboard(chatId, "✏️ Выбран сотрудник: <b>" + excelName + "</b>\n\nНапишите дату ИЛИ период дат, которые нужно изменить.\n\n<i>Пример 1:</i> <code>15.11.2026</code>\n<i>Пример 2:</i> <code>01.11.2026-07.11.2026</code>");
+                // Сохраняем имя и ID текущего окна для идеального SPA
+                waitingScheduleEditUser.put(chatId, excelName + ":" + messageId);
+
+                InlineKeyboardMarkup markup = new InlineKeyboardMarkup(List.of(List.of(createBtn("❌ Отменить", "CANCEL_PROMPT"))));
+                EditMessageText edit = new EditMessageText();
+                edit.setChatId(String.valueOf(chatId)); edit.setMessageId(messageId);
+                edit.setText("✏️ Выбран сотрудник: <b>" + excelName + "</b>\n\nНапишите дату ИЛИ период дат, которые нужно изменить.\n\n<i>Пример 1:</i> <code>15.11.2026</code>\n<i>Пример 2:</i> <code>01.11.2026-07.11.2026</code>");
+                edit.setParseMode("HTML"); edit.setReplyMarkup(markup);
+                try { execute(edit); } catch (Exception e) {}
                 return;
             }
 
@@ -2191,9 +2198,11 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 String savedData = waitingScheduleEditDate.remove(chatId);
                 if (savedData == null) { sendMenu(chatId, role, "❌ Ошибка сессии редактирования. Начните заново."); return; }
 
-                String[] mainParts = savedData.split(":", 2);
+                // Достаем сохраненный messageId окна, если он есть
+                String[] mainParts = savedData.split(":");
                 String targetUser = mainParts[0];
                 String dateRangeStr = mainParts[1];
+                Integer anchorMsgId = mainParts.length > 2 ? Integer.parseInt(mainParts[2]) : messageId;
 
                 String statusCode = ""; String start = ""; String end = "";
                 if (payload.equals("В") || payload.equals("О") || payload.equals("Д") || payload.equals("Б") || payload.equals("А") || payload.equals("Г") || payload.equals("П")) {
@@ -2226,12 +2235,20 @@ public class WarehouseBot extends TelegramLongPollingBot {
                         current = current.plusDays(1);
                     }
 
-                    sendScheduleMenu(chatId, role, "✅ График сотрудника <b>" + targetUser + "</b> успешно изменен (" + displayDate + ")!", null);                    sendScheduleView(chatId, targetUser, startDate.getYear(), startDate.getMonthValue(), false, null);
+                    // --- ИСПРАВЛЕНИЕ SPA: Передаем anchorMsgId в метод отрисовки графика, чтобы он обновил текущее окно ---
+                    sendScheduleView(chatId, targetUser, startDate.getYear(), startDate.getMonthValue(), false, anchorMsgId);
 
                     Long targetUserId = DatabaseManager.getUserIdByExcelName(targetUser);
                     if (targetUserId != null) {
                         sendDirectNotification(targetUserId, "⚠ <b>ВНИМАНИЕ!</b>\nАдминистратор изменил ваш график!\nДата: <b>" + displayDate + "</b>\nНовая смена/статус: <b>" + (statusCode.isEmpty() ? payload : statusCode) + "</b>");
                     }
+
+                    // Показываем всплывающее уведомление об успехе
+                    AnswerCallbackQuery ans = new AnswerCallbackQuery();
+                    ans.setCallbackQueryId(update.getCallbackQuery().getId());
+                    ans.setText("✅ График изменен!");
+                    try { execute(ans); } catch (Exception e) {}
+
                 } catch (Exception e) {
                     sendMenu(chatId, role, "❌ Ошибка при обработке дат.");
                 }
@@ -2939,18 +2956,23 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 return;
             }
             if (waitingScheduleEditUser.containsKey(chatId)) {
-                String targetUser = waitingScheduleEditUser.remove(chatId);
-                try {
-                    String input = text.trim();
-                    java.time.format.DateTimeFormatter dtf = java.time.format.DateTimeFormatter.ofPattern("dd.MM.yyyy");
-                    String savedDateRange;
-                    String displayDate;
+                String savedState = waitingScheduleEditUser.remove(chatId);
+                String[] stateParts = savedState.split(":");
+                String targetUser = stateParts[0];
+                Integer anchorId = stateParts.length > 1 ? Integer.parseInt(stateParts[1]) : null;
 
+                String input = text.trim();
+                java.time.format.DateTimeFormatter dtf = java.time.format.DateTimeFormatter.ofPattern("dd.MM.yyyy");
+                String savedDateRange;
+                String displayDate;
+
+                // БЛОК 1: Строгая проверка даты
+                try {
                     if (input.contains("-")) {
                         String[] parts = input.split("-");
                         java.time.LocalDate start = java.time.LocalDate.parse(parts[0].trim(), dtf);
                         java.time.LocalDate end = java.time.LocalDate.parse(parts[1].trim(), dtf);
-                        if (start.isAfter(end)) throw new Exception("Ошибка: Начальная дата больше конечной");
+                        if (start.isAfter(end)) throw new Exception("Начальная дата больше конечной");
                         savedDateRange = start.format(dtf) + "-" + end.format(dtf);
                         displayDate = "с " + start.format(dtf) + " по " + end.format(dtf);
                     } else {
@@ -2958,21 +2980,38 @@ public class WarehouseBot extends TelegramLongPollingBot {
                         savedDateRange = date.format(dtf);
                         displayDate = date.format(dtf);
                     }
-
-                    waitingScheduleEditDate.put(chatId, targetUser + ":" + savedDateRange);
-
-                    InlineKeyboardMarkup markup = new InlineKeyboardMarkup(List.of(
-                            List.of(createBtn("В (Выходной)", "ED_SCH_S:В"), createBtn("О (Отпуск)", "ED_SCH_S:О"), createBtn("Д (Дежурство)", "ED_SCH_S:Д")),
-                            List.of(createBtn("Б (Больничный)", "ED_SCH_S:Б"), createBtn("А (За свой счет)", "ED_SCH_S:А"), createBtn("Г (Военкомат)", "ED_SCH_S:Г")),
-                            List.of(createBtn("П (Другое подразделение)", "ED_SCH_S:П")),
-                            List.of(createBtn("08:30 - 17:30", "ED_SCH_S:08:30-17:30"), createBtn("12:00 - 21:00", "ED_SCH_S:12:00-21:00"))
-                    ));
-                    SendMessage msg = new SendMessage(String.valueOf(chatId), "⚙️ Устанавливаем смену на <b>" + displayDate + "</b> для <b>" + targetUser + "</b>.\n\nВыберите тип смены из кнопок:");
-                    msg.setParseMode("HTML"); msg.setReplyMarkup(markup);
-                    execute(msg);
                 } catch (Exception e) {
-                    sendCancelKeyboard(chatId, "❌ Неверный формат даты.\nПример правильного ввода: <code>15.11.2026</code> ИЛИ <code>01.11.2026-07.11.2026</code>");
-                    waitingScheduleEditUser.put(chatId, targetUser);
+                    // Если дата реально кривая - редактируем окно с ошибкой
+                    waitingScheduleEditUser.put(chatId, savedState);
+                    if (anchorId != null) {
+                        EditMessageText edit = new EditMessageText();
+                        edit.setChatId(String.valueOf(chatId)); edit.setMessageId(anchorId);
+                        edit.setText("❌ <b>Неверный формат даты.</b>\nПример правильного ввода:\n<code>15.11.2026</code> ИЛИ <code>01.11.2026-07.11.2026</code>\n\nВведите дату еще раз:");
+                        edit.setParseMode("HTML");
+                        edit.setReplyMarkup(new InlineKeyboardMarkup(List.of(List.of(createBtn("❌ Отменить", "CANCEL_PROMPT")))));
+                        try { execute(edit); } catch (Exception ignored) {}
+                    }
+                    return;
+                }
+
+                // БЛОК 2: Если дата правильная - показываем кнопки выбора смены в ЭТОМ ЖЕ окне
+                waitingScheduleEditDate.put(chatId, targetUser + ":" + savedDateRange + (anchorId != null ? ":" + anchorId : ""));
+
+                InlineKeyboardMarkup markup = new InlineKeyboardMarkup(List.of(
+                        List.of(createBtn("В (Выходной)", "ED_SCH_S:В"), createBtn("О (Отпуск)", "ED_SCH_S:О"), createBtn("Д (Дежурство)", "ED_SCH_S:Д")),
+                        List.of(createBtn("Б (Больничный)", "ED_SCH_S:Б"), createBtn("А (За свой счет)", "ED_SCH_S:А"), createBtn("Г (Военкомат)", "ED_SCH_S:Г")),
+                        List.of(createBtn("П (Другое подразделение)", "ED_SCH_S:П")),
+                        List.of(createBtn("08:30 - 17:30", "ED_SCH_S:08:30-17:30"), createBtn("12:00 - 21:00", "ED_SCH_S:12:00-21:00")),
+                        List.of(createBtn("❌ Отменить", "CANCEL_PROMPT"))
+                ));
+
+                String msgText = "⚙️ Устанавливаем смену на <b>" + displayDate + "</b> для <b>" + targetUser + "</b>.\n\nВыберите тип смены из кнопок:";
+
+                if (anchorId != null) {
+                    EditMessageText edit = new EditMessageText();
+                    edit.setChatId(String.valueOf(chatId)); edit.setMessageId(anchorId);
+                    edit.setText(msgText); edit.setParseMode("HTML"); edit.setReplyMarkup(markup);
+                    try { execute(edit); } catch (Exception e) {}
                 }
                 return;
             }

@@ -181,6 +181,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
 
         rows.add(List.of(createBtn("🗓 Мой график", "SCHED_MINE"), createBtn("🤝 С кем я в смене?", "SCHED_WITH_ME")));
         rows.add(List.of(createBtn("👁 График коллеги", "SCHED_COL_LIST"), createBtn("👥 Кто сегодня работает?", "SCHED_TODAY")));
+        rows.add(List.of(createBtn("🔜 Кто работает завтра?", "SCHED_TOMORROW")));
         rows.add(List.of(createBtn("🤒 Сообщить о больничном", "SCHED_SICK")));
 
         List<InlineKeyboardButton> adminRow = new ArrayList<>();
@@ -1276,6 +1277,41 @@ public class WarehouseBot extends TelegramLongPollingBot {
             }
             if (data.equals("SCHED_TODAY")) {
                 sendScheduleTextSection(chatId, messageId, DatabaseManager.getTodayRoster());
+                return;
+            }
+            // --- КНОПКА "КТО РАБОТАЕТ ЗАВТРА?" ---
+            if (data.equals("SCHED_TOMORROW")) {
+                int dayOfWeek = java.time.LocalDate.now().getDayOfWeek().getValue(); // 1=Пн, 5=Пт, 6=Сб, 7=Вс
+
+                if (dayOfWeek == 5) {
+                    // ПЯТНИЦА: Спрашиваем, какой день нужен
+                    InlineKeyboardMarkup markup = new InlineKeyboardMarkup(List.of(
+                            List.of(createBtn("Сб (Завтра)", "SCHED_DAY_1"), createBtn("Пн (След. рабочий)", "SCHED_DAY_3")),
+                            List.of(createBtn("🔙 Назад", "SCHED_MAIN"), createBtn("❌ Закрыть", "GENERIC_CLOSE"))
+                    ));
+                    EditMessageText edit = new EditMessageText();
+                    edit.setChatId(String.valueOf(chatId)); edit.setMessageId(messageId);
+                    edit.setText("🗓 <b>Уточните дату</b>\n\nВы хотите посмотреть график на выходной день (Суббота) или на следующий рабочий (Понедельник)?");
+                    edit.setParseMode("HTML"); edit.setReplyMarkup(markup);
+                    try { execute(edit); } catch (Exception e) {}
+                } else if (dayOfWeek == 6) {
+                    // СУББОТА: Сразу показываем понедельник (+2 дня)
+                    sendScheduleTextSection(chatId, messageId, DatabaseManager.getTargetDayRoster(2, "Понедельник"));
+                } else if (dayOfWeek == 7) {
+                    // ВОСКРЕСЕНЬЕ: Сразу показываем понедельник (+1 день)
+                    sendScheduleTextSection(chatId, messageId, DatabaseManager.getTargetDayRoster(1, "Понедельник"));
+                } else {
+                    // ПН, ВТ, СР, ЧТ: Сразу показываем завтра (+1 день)
+                    sendScheduleTextSection(chatId, messageId, DatabaseManager.getTargetDayRoster(1, "Завтра"));
+                }
+                return;
+            }
+
+            // Обработка выбора дня, если сегодня Пятница
+            if (data.startsWith("SCHED_DAY_")) {
+                int offset = Integer.parseInt(data.split("_")[2]);
+                String dayName = (offset == 1) ? "Субботу" : "Понедельник";
+                sendScheduleTextSection(chatId, messageId, DatabaseManager.getTargetDayRoster(offset, dayName));
                 return;
             }
             if (data.equals("SCHED_SICK")) {

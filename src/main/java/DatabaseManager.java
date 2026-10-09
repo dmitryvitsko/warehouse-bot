@@ -2671,6 +2671,74 @@ public class DatabaseManager {
         return sb.toString().trim();
     }
 
+    // Метод: Сводка на любой будущий день (Для кнопки "Кто работает завтра?")
+    public static String getTargetDayRoster(int daysOffset, String dayLabel) {
+        java.time.LocalDate targetDate = java.time.LocalDate.now().plusDays(daysOffset);
+        int year = targetDate.getYear();
+        int month = targetDate.getMonthValue();
+        int day = targetDate.getDayOfMonth();
+        String dayOfWeekRu = getDayOfWeekRu(year, month, day);
+
+        StringBuilder sb = new StringBuilder();
+        sb.append(String.format("📅 <b>Сводка на %s (%02d.%02d.%d, %s):</b>\n\n", dayLabel.toLowerCase(), day, month, year, dayOfWeekRu));
+
+        List<String> firstShift = new ArrayList<>();
+        List<String> secondShift = new ArrayList<>();
+        List<String> duty = new ArrayList<>();
+        List<String> otherDept = new ArrayList<>();
+        List<String> absent = new ArrayList<>();
+
+        try (Connection conn = getConnection();
+             PreparedStatement ps = conn.prepareStatement(
+                     "SELECT excel_name, start_time, end_time, status_code FROM schedules_v2 WHERE year = ? AND month = ? AND day = ? ORDER BY excel_name")) {
+
+            ps.setInt(1, year);
+            ps.setInt(2, month);
+            ps.setInt(3, day);
+            ResultSet rs = ps.executeQuery();
+
+            boolean hasAnyData = false;
+            while (rs.next()) {
+                hasAnyData = true;
+                String name = rs.getString("excel_name");
+                String start = rs.getString("start_time");
+                String end = rs.getString("end_time");
+                String status = rs.getString("status_code");
+
+                if ("В".equals(status)) absent.add("▪️ " + name + " — 🏖 Выходной");
+                else if ("О".equals(status)) absent.add("▪️ " + name + " — 🌴 Отпуск");
+                else if ("Б".equals(status)) absent.add("▪️ " + name + " — 💊 Больничный");
+                else if ("А".equals(status)) absent.add("▪️ " + name + " — 📄 За свой счет");
+                else if ("Г".equals(status)) absent.add("▪️ " + name + " — 🪖 Военкомат");
+                else if ("П".equals(status)) otherDept.add("▪️ " + name);
+                else if ("Д".equals(status)) duty.add("▪️ " + name + " — ❗️ Дежурство");
+                else {
+                    boolean isSecond = false;
+                    if (end != null && (end.contains("21:00") || end.contains("21.00"))) isSecond = true;
+                    else if (start != null && (start.startsWith("11:") || start.startsWith("12:") || start.startsWith("13:") || start.startsWith("14:"))) isSecond = true;
+
+                    String timeStr = (start != null && end != null && !start.isEmpty() && !end.isEmpty()) ? " (" + start + " - " + end + ")" : "";
+
+                    if (isSecond) secondShift.add("▪️ " + name + timeStr);
+                    else firstShift.add("▪️ " + name + timeStr);
+                }
+            }
+
+            if (!hasAnyData) return "ℹ️ На этот день график еще не загружен.";
+
+            if (!firstShift.isEmpty()) sb.append("☀️ <b>Первая смена:</b>\n").append(String.join("\n", firstShift)).append("\n\n");
+            if (!secondShift.isEmpty()) sb.append("🌙 <b>Вторая смена:</b>\n").append(String.join("\n", secondShift)).append("\n\n");
+            if (!duty.isEmpty()) sb.append("🚨 <b>Дежурство:</b>\n").append(String.join("\n", duty)).append("\n\n");
+            if (!otherDept.isEmpty()) sb.append("🏢 <b>В другом подразделении:</b>\n").append(String.join("\n", otherDept)).append("\n\n");
+            if (!absent.isEmpty()) sb.append("❌ <b>Отсутствуют:</b>\n").append(String.join("\n", absent));
+
+        } catch (SQLException e) {
+            e.printStackTrace();
+            return "❌ Ошибка при получении сводки.";
+        }
+        return sb.toString().trim();
+    }
+
     public static String removeWorkerCompletely(String excelName) {
         int scheduleDeleted = 0;
         int usersReset = 0;

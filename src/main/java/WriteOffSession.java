@@ -1,4 +1,5 @@
 public class WriteOffSession {
+    public Integer anchorMsgId;     // ДОБАВЛЕНО: ID сообщения-контейнера для редактирования
     public String step;             // Текущий шаг диалога
     public int materialId;          // ID выбранного материала
     public String materialName;     // Название материала

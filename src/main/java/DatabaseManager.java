@@ -1565,6 +1565,7 @@ public class DatabaseManager {
     }
 
     public static class ReceiptSession {
+        public Integer anchorMsgId; // <--- ДОБАВИТЬ ЭТУ СТРОКУ
         public List<ReceiptItem> items = new ArrayList<>();
         public int waitingServiceId = -1;
         public int waitingMaterialId = -1;

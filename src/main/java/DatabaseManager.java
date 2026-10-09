@@ -1825,22 +1825,53 @@ public class DatabaseManager {
     public static String saveImportedTools(List<ParsedTool> tools) {
         try (Connection conn = getConnection()) {
             conn.setAutoCommit(false);
-            String sql = "INSERT INTO tools (name, inv_number, status) VALUES (?, ?, 'IN_STOCK')";
+
+            // SQL для проверки, существует ли такой инвентарник
+            String checkSql = "SELECT id FROM tools WHERE inv_number = ?";
+            // SQL для добавления нового
+            String insertSql = "INSERT INTO tools (name, inv_number, status) VALUES (?, ?, 'IN_STOCK')";
+            // SQL для обновления названия (если бухгалтер его поменял)
+            String updateSql = "UPDATE tools SET name = ? WHERE inv_number = ?";
+
             int addedCount = 0;
-            try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            int updatedCount = 0;
+
+            try (PreparedStatement checkPs = conn.prepareStatement(checkSql);
+                 PreparedStatement insertPs = conn.prepareStatement(insertSql);
+                 PreparedStatement updatePs = conn.prepareStatement(updateSql)) {
+
                 for (ParsedTool t : tools) {
                     int qty = t.quantity > 0 ? t.quantity : 1;
+
                     for (int i = 1; i <= qty; i++) {
-                        ps.setString(1, t.name);
-                        String inv = (t.invNumber == null || t.invNumber.trim().isEmpty()) ? "Б/Н - " + i : (qty > 1 ? t.invNumber + " (" + i + ")" : t.invNumber);
-                        ps.setString(2, inv);
-                        ps.executeUpdate();
-                        addedCount++;
+                        String inv = (t.invNumber == null || t.invNumber.trim().isEmpty())
+                                ? "Б/Н (" + t.name + ") - " + i
+                                : (qty > 1 ? t.invNumber + " (" + i + ")" : t.invNumber);
+
+                        // 1. Проверяем, есть ли уже такой инструмент в базе
+                        checkPs.setString(1, inv);
+                        try (ResultSet rs = checkPs.executeQuery()) {
+                            if (rs.next()) {
+                                // 2. Инструмент УЖЕ ЕСТЬ.
+                                // Статус (выдан/не выдан) НЕ ТРОГАЕМ. Обновляем только имя на всякий случай.
+                                updatePs.setString(1, t.name);
+                                updatePs.setString(2, inv);
+                                updatePs.executeUpdate();
+                                updatedCount++;
+                            } else {
+                                // 3. Этого инструмента нет в базе. Добавляем на склад!
+                                insertPs.setString(1, t.name);
+                                insertPs.setString(2, inv);
+                                insertPs.executeUpdate();
+                                addedCount++;
+                            }
+                        }
                     }
                 }
             }
             conn.commit();
-            return "✅ <b>База инструмента успешно загружена!</b>\nДобавлено единиц на склад: <b>" + addedCount + "</b> шт.";
+            return "✅ <b>База инструмента успешно синхронизирована!</b>\nДобавлено новых: <b>" + addedCount + "</b> шт.\nОбновлено существующих: <b>" + updatedCount + "</b> шт.";
+
         } catch (SQLException e) {
             e.printStackTrace();
             return "❌ Ошибка базы данных при сохранении инструмента: " + e.getMessage();
@@ -2854,5 +2885,29 @@ public class DatabaseManager {
         }
 
         return found ? sb.toString().trim() : null;
+    }
+    public static String transferWelder(int welderId, long fromUserId, long toUserId) {
+        String fromName = getUserFullName(fromUserId);
+        String toName = getUserFullName(toUserId);
+
+        // Предполагаемые названия колонок взяты по аналогии с вашим кодом
+        try (Connection conn = getConnection();
+             PreparedStatement ps1 = conn.prepareStatement("UPDATE welders SET assigned_to_user_id = ?, status = 'IN_USE' WHERE id = ?");
+             PreparedStatement ps2 = conn.prepareStatement("INSERT INTO welders_log (welder_id, action, user_id, action_time, details) VALUES (?, 'TRANSFER', ?, NOW(), ?)")) {
+
+            ps1.setLong(1, toUserId);
+            ps1.setInt(2, welderId);
+            ps1.executeUpdate();
+
+            ps2.setInt(1, welderId);
+            ps2.setLong(2, toUserId);
+            ps2.setString(3, "Передан напрямую: " + fromName + " ➔ " + toName);
+            ps2.executeUpdate();
+
+            return "OK";
+        } catch (Exception e) {
+            e.printStackTrace();
+            return "ERROR";
+        }
     }
 }

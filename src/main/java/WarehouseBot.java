@@ -97,6 +97,17 @@ public class WarehouseBot extends TelegramLongPollingBot {
     // Память: кто уже нажал "Оставить на завтра" (чтобы не спамить)
     private final Map<Long, LocalDate> keptWelderForTomorrow = new ConcurrentHashMap<>();
 
+    public static class PendingWelderTransfer {
+        public int welderId;
+        public long senderId;
+        public long receiverId;
+        public Integer senderMsgId;
+        public Integer receiverMsgId;
+    }
+    // Блокировка и память для передачи аппаратов
+    private final Map<Long, PendingWelderTransfer> pendingWelderTransfers = new ConcurrentHashMap<>();
+    private final Map<Long, Long> activeSenderTransfers = new ConcurrentHashMap<>();
+
     private static final Properties config = new Properties();
     static {
         try (FileInputStream fis = new FileInputStream("config.properties")) {
@@ -224,7 +235,11 @@ public class WarehouseBot extends TelegramLongPollingBot {
 
         if (myBusyWelderId != null) {
             sb.insert(statusMsg != null ? sb.indexOf("\n\n") + 2 : 0, "⚠️ <b>На вас сейчас числится: " + myBusyWelderName + "</b>\n\n");
-            rows.add(List.of(createBtn("↩️ ВЕРНУТЬ " + myBusyWelderName.toUpperCase() + " НА БАЗУ", "W_RET:" + myBusyWelderId)));
+            // ДОБАВЛЕНА КНОПКА ПЕРЕДАЧИ
+            rows.add(List.of(
+                    createBtn("↩️ ВЕРНУТЬ НА БАЗУ", "W_RET:" + myBusyWelderId),
+                    createBtn("🔄 Передать коллеге", "W_TRANS_START:" + myBusyWelderId)
+            ));
             sb.append("\n👇 <b>Управление и свободные аппараты:</b>");
         } else {
             sb.append("\n👇 <b>Выберите свобод аппарат, который берете с базы:</b>");
@@ -256,6 +271,32 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 execute(edit);
             }
         } catch (Exception e) { e.printStackTrace(); }
+    }
+
+    private void sendWelderTransferUsersMenu(long chatId, int welderId, int messageId) {
+        List<String[]> users = DatabaseManager.getUsersForToolAssignment();
+        InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
+        List<List<InlineKeyboardButton>> rows = new ArrayList<>();
+        List<InlineKeyboardButton> currentRow = new ArrayList<>();
+
+        for (String[] u : users) {
+            long uId = Long.parseLong(u[0]);
+            if (uId == chatId) continue; // Исключаем самого себя
+            currentRow.add(createBtn("👤 " + u[1], "W_TRANS_SEL:" + welderId + ":" + uId));
+            if (currentRow.size() == 2) {
+                rows.add(currentRow);
+                currentRow = new ArrayList<>();
+            }
+        }
+        if (!currentRow.isEmpty()) rows.add(currentRow);
+        rows.add(List.of(createBtn("🔙 Назад", "W_MAIN_MENU")));
+        markup.setKeyboard(rows);
+
+        EditMessageText edit = new EditMessageText();
+        edit.setChatId(String.valueOf(chatId)); edit.setMessageId(messageId);
+        edit.setText("🔄 <b>Кому передаем " + DatabaseManager.getWelderNameById(welderId) + "?</b>\nВыберите сотрудника из списка:");
+        edit.setParseMode("HTML"); edit.setReplyMarkup(markup);
+        try { execute(edit); } catch (Exception e) {}
     }
 
     private void sendWeldersHistoryMenu(long chatId, int messageId) {
@@ -748,6 +789,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
         KeyboardRow r3 = new KeyboardRow(); r3.add("🧾 Калькулятор квитанции"); r3.add("📋 Тарифы услуг"); keyboard.add(r3);
         KeyboardRow r4 = new KeyboardRow(); r4.add("📸 Плановый осмотр ОРШ"); r4.add("🗓 График работ"); keyboard.add(r4);
         KeyboardRow r5 = new KeyboardRow(); r5.add("🔢 Коды закрытия"); r5.add("📞 Справочник"); keyboard.add(r5);
+        KeyboardRow r6 = new KeyboardRow(); r6.add("🛠 Неисправности"); keyboard.add(r6);
 
         boolean tmAccess = canAccessTm(chatId, role);
 
@@ -1194,6 +1236,18 @@ public class WarehouseBot extends TelegramLongPollingBot {
 
             if ("BANNED".equals(role) || "PENDING".equals(role)) return;
 
+            // Блокировка кнопок для принимающего сварочник
+            if (pendingWelderTransfers.containsKey(chatId)) {
+                if (!data.startsWith("W_TRANS_ACC:") && !data.startsWith("W_TRANS_REJ:")) {
+                    AnswerCallbackQuery ans = new AnswerCallbackQuery();
+                    ans.setCallbackQueryId(update.getCallbackQuery().getId());
+                    ans.setText("⚠️ Сначала примите или отклоните передачу сварочника!");
+                    ans.setShowAlert(true);
+                    try { execute(ans); } catch (Exception e) {}
+                    return;
+                }
+            }
+
             if (data.equals("SCHED_MAIN")) {
                 sendScheduleMenu(chatId, role, "🗓 <b>Графики и смены:</b>\nВыберите, что хотите посмотреть:", messageId);
                 return;
@@ -1259,6 +1313,44 @@ public class WarehouseBot extends TelegramLongPollingBot {
             if (data.equals("SCHED_ADD") && "ADMIN".equals(role)) {
                 waitingNewEmployeeName.put(chatId, true);
                 sendCancelKeyboard(chatId, "👤 Введите ФИО нового сотрудника (например: <b>Баранов А.В.</b>):");
+                return;
+            }
+
+            // --- РАЗДЕЛ "НЕИСПРАВНОСТИ" ---
+            if (data.equals("ERRORS_MAIN")) {
+                InlineKeyboardMarkup markup = new InlineKeyboardMarkup(List.of(
+                        List.of(createBtn("🌐 Модемы", "ERRORS_MODEMS"), createBtn("📺 Приставки", "ERRORS_STB")),
+                        List.of(createBtn("❌ Закрыть", "GENERIC_CLOSE"))
+                ));
+                EditMessageText edit = new EditMessageText();
+                edit.setChatId(String.valueOf(chatId)); edit.setMessageId(messageId);
+                edit.setText("🛠 <b>Справочник неисправностей</b>\n\nВыберите тип оборудования, чтобы просмотреть частые проблемы:");
+                edit.setParseMode("HTML"); edit.setReplyMarkup(markup);
+                try { execute(edit); } catch (Exception e) {}
+                return;
+            }
+
+            if (data.equals("ERRORS_MODEMS")) {
+                InlineKeyboardMarkup markup = new InlineKeyboardMarkup(List.of(
+                        List.of(createBtn("🔙 Назад", "ERRORS_MAIN"), createBtn("❌ Закрыть", "GENERIC_CLOSE"))
+                ));
+                EditMessageText edit = new EditMessageText();
+                edit.setChatId(String.valueOf(chatId)); edit.setMessageId(messageId);
+                edit.setText(getModemErrorsText());
+                edit.setParseMode("HTML"); edit.setReplyMarkup(markup);
+                try { execute(edit); } catch (Exception e) {}
+                return;
+            }
+
+            if (data.equals("ERRORS_STB")) {
+                InlineKeyboardMarkup markup = new InlineKeyboardMarkup(List.of(
+                        List.of(createBtn("🔙 Назад", "ERRORS_MAIN"), createBtn("❌ Закрыть", "GENERIC_CLOSE"))
+                ));
+                EditMessageText edit = new EditMessageText();
+                edit.setChatId(String.valueOf(chatId)); edit.setMessageId(messageId);
+                edit.setText(getStbErrorsText());
+                edit.setParseMode("HTML"); edit.setReplyMarkup(markup);
+                try { execute(edit); } catch (Exception e) {}
                 return;
             }
 
@@ -2162,6 +2254,115 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 }
                 return;
             }
+
+            if (data.startsWith("W_TRANS_START:")) {
+                int welderId = Integer.parseInt(data.split(":")[1]);
+                sendWelderTransferUsersMenu(chatId, welderId, messageId);
+                return;
+            }
+
+            if (data.startsWith("W_TRANS_SEL:")) {
+                String[] p = data.split(":");
+                int welderId = Integer.parseInt(p[1]);
+                long receiverId = Long.parseLong(p[2]);
+
+                if (pendingWelderTransfers.containsKey(receiverId)) {
+                    AnswerCallbackQuery ans = new AnswerCallbackQuery();
+                    ans.setCallbackQueryId(update.getCallbackQuery().getId());
+                    ans.setText("❌ Этот сотрудник сейчас уже рассматривает другой запрос!");
+                    ans.setShowAlert(true);
+                    try { execute(ans); } catch (Exception e) {}
+                    return;
+                }
+
+                PendingWelderTransfer pt = new PendingWelderTransfer();
+                pt.welderId = welderId;
+                pt.senderId = chatId;
+                pt.receiverId = receiverId;
+                pt.senderMsgId = messageId;
+
+                pendingWelderTransfers.put(receiverId, pt);
+                activeSenderTransfers.put(chatId, receiverId);
+
+                // 1. Блокируем принимающего новым сообщением
+                InlineKeyboardMarkup recMarkup = new InlineKeyboardMarkup(List.of(
+                        List.of(createBtn("✅ Принять", "W_TRANS_ACC:" + welderId + ":" + chatId),
+                                createBtn("❌ Отказаться", "W_TRANS_REJ:" + welderId + ":" + chatId))
+                ));
+                SendMessage recMsg = new SendMessage(String.valueOf(receiverId), "🚨 <b>ПЕРЕДАЧА ОБОРУДОВАНИЯ!</b>\n\nКоллега <b>" + firstName + "</b> передает вам сварочный аппарат <b>" + DatabaseManager.getWelderNameById(welderId) + "</b>.\n\n👇 Подтвердите получение:");
+                recMsg.setParseMode("HTML"); recMsg.setReplyMarkup(recMarkup);
+                try { var sent = execute(recMsg); pt.receiverMsgId = sent.getMessageId(); } catch (Exception e) {}
+
+                // 2. Окно передающего уходит в ожидание (SPA)
+                String receiverName = DatabaseManager.getUserFullName(receiverId);
+                InlineKeyboardMarkup sndMarkup = new InlineKeyboardMarkup(List.of(List.of(createBtn("🚫 Отменить передачу", "W_TRANS_CANCEL:" + welderId))));
+                EditMessageText edit = new EditMessageText();
+                edit.setChatId(String.valueOf(chatId)); edit.setMessageId(messageId);
+                edit.setText("⏳ <b>Ожидание подтверждения...</b>\n\nВы передаете аппарат <b>" + DatabaseManager.getWelderNameById(welderId) + "</b> сотруднику <b>" + receiverName + "</b>.\nЗапрос отправлен, ожидаем решения...");
+                edit.setParseMode("HTML"); edit.setReplyMarkup(sndMarkup);
+                try { execute(edit); } catch (Exception e) {}
+                return;
+            }
+
+            if (data.startsWith("W_TRANS_CANCEL:")) {
+                Long recId = activeSenderTransfers.remove(chatId);
+                if (recId != null) {
+                    PendingWelderTransfer pt = pendingWelderTransfers.remove(recId);
+                    if (pt != null && pt.receiverMsgId != null) {
+                        try { execute(new DeleteMessage(String.valueOf(recId), pt.receiverMsgId)); } catch (Exception e) {}
+                        sendDirectNotification(recId, "ℹ️ Коллега отменил передачу сварочного аппарата.");
+                    }
+                }
+                sendWeldersMenu(chatId, role, messageId, "🚫 Вы отменили передачу аппарата.");
+                return;
+            }
+
+            if (data.startsWith("W_TRANS_ACC:")) {
+                String[] p = data.split(":");
+                int welderId = Integer.parseInt(p[1]);
+                long senderId = Long.parseLong(p[2]);
+
+                PendingWelderTransfer pt = pendingWelderTransfers.remove(chatId);
+                activeSenderTransfers.remove(senderId);
+
+                // Запись в БД
+                DatabaseManager.transferWelder(welderId, senderId, chatId);
+
+                // Окно принимающего
+                EditMessageText edit = new EditMessageText();
+                edit.setChatId(String.valueOf(chatId)); edit.setMessageId(messageId);
+                edit.setText("✅ <b>Вы успешно приняли сварочный аппарат!</b>");
+                edit.setParseMode("HTML"); edit.setReplyMarkup(new InlineKeyboardMarkup(List.of(List.of(createBtn("❌ Закрыть", "GENERIC_CLOSE")))));
+                try { execute(edit); } catch (Exception e) {}
+
+                // SPA обновление окна передающего
+                if (pt != null && pt.senderMsgId != null) {
+                    sendWeldersMenu(senderId, DatabaseManager.getUserRole(senderId, "Сотрудник"), pt.senderMsgId, "✅ Коллега подтвердил прием сварочника!");
+                }
+                return;
+            }
+
+            if (data.startsWith("W_TRANS_REJ:")) {
+                String[] p = data.split(":");
+                long senderId = Long.parseLong(p[2]);
+
+                PendingWelderTransfer pt = pendingWelderTransfers.remove(chatId);
+                activeSenderTransfers.remove(senderId);
+
+                // Окно принимающего
+                EditMessageText edit = new EditMessageText();
+                edit.setChatId(String.valueOf(chatId)); edit.setMessageId(messageId);
+                edit.setText("❌ Вы отказались от приема сварочного аппарата.");
+                edit.setParseMode("HTML"); edit.setReplyMarkup(new InlineKeyboardMarkup(List.of(List.of(createBtn("❌ Закрыть", "GENERIC_CLOSE")))));
+                try { execute(edit); } catch (Exception e) {}
+
+                // SPA обновление окна передающего
+                if (pt != null && pt.senderMsgId != null) {
+                    sendWeldersMenu(senderId, DatabaseManager.getUserRole(senderId, "Сотрудник"), pt.senderMsgId, "❌ Коллега отказался принять сварочник.");
+                }
+                return;
+            }
+
             if (data.equals("W_KEEP_TOMORROW")) {
                 forceWelderReturnIds.remove(chatId);
                 keptWelderForTomorrow.put(chatId, LocalDate.now());
@@ -2523,7 +2724,29 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 return;
             }
 
+            // Блокировка текстовых команд для принимающего
+            if (pendingWelderTransfers.containsKey(chatId)) {
+                SendMessage blockMsg = new SendMessage(String.valueOf(chatId), "⚠️ <b>ДОСТУП ЗАБЛОКИРОВАН!</b>\nКоллега передает вам сварочный аппарат.\n\n👇 Пожалуйста, найдите сообщение ниже с кнопками <b>«Принять»</b> / <b>«Отказаться»</b> и сделайте выбор.");
+                blockMsg.setParseMode("HTML"); try { execute(blockMsg); } catch (Exception e) {}
+                return;
+            }
+
             if (checkUnboundAndNotify(chatId, role)) return;
+
+            if (text.equals("🛠 Неисправности")) {
+                // Очищаем чат от мусора (сообщения пользователя)
+                try { execute(new DeleteMessage(String.valueOf(chatId), update.getMessage().getMessageId())); } catch (Exception e) {}
+
+                InlineKeyboardMarkup markup = new InlineKeyboardMarkup(List.of(
+                        List.of(createBtn("🌐 Модемы", "ERRORS_MODEMS"), createBtn("📺 Приставки", "ERRORS_STB")),
+                        List.of(createBtn("❌ Закрыть", "GENERIC_CLOSE"))
+                ));
+                SendMessage msg = new SendMessage(String.valueOf(chatId), "🛠 <b>Справочник неисправностей</b>\n\nВыберите тип оборудования, чтобы просмотреть частые проблемы:");
+                msg.setParseMode("HTML");
+                msg.setReplyMarkup(markup);
+                try { execute(msg); } catch (Exception e) {}
+                return;
+            }
 
             if (text.equals("❌ Отменить") || text.equals("🔙 Назад")) {
                 TmReportSession cancelledSession = tmReportSessions.remove(chatId);
@@ -3754,4 +3977,23 @@ public class WarehouseBot extends TelegramLongPollingBot {
 
     public Map<Long, Integer> getForceWelderReturnIds() { return forceWelderReturnIds; }
     public Map<Long, LocalDate> getKeptWelderForTomorrow() { return keptWelderForTomorrow; }
+
+    private String getModemErrorsText() {
+        return "🌐 <b>Неисправности модемов:</b>\n\n" +
+                "• Низкий уровень Wi-Fi\n• Не раздает Wi-Fi\n• Нестабильный уровень Wi-Fi\n" +
+                "• Замена на двухдиапазонный\n• Нет услуг\n• Не регистрируется\n• Не работает телефония\n" +
+                "• LOS\n• Постоянная перезагрузка\n• Не работает LAN\n• Горит только power\n" +
+                "• Не включается\n• Посторонние звуки\n• Запах гари\n• Пропадает сессия\n" +
+                "• Пропадает соединение по LAN\n• Отключается сеть 5G\n• Нужны гигабитные порты\n" +
+                "• Горит LOS и PON, не работают услуги\n• Отключается";
+    }
+
+    private String getStbErrorsText() {
+        return "📺 <b>Неисправности приставок:</b>\n\n" +
+                "• Ошибка 1901\n• Ошибка 1305\n• Ошибка 1306\n• Зависание\n• Нет звука\n" +
+                "• Нет питания\n• Постоянная перезагрузка\n• Не реагирует на пульт\n• Нет изображения\n" +
+                "• Пропадает изображение\n• Мерцание\n• Нечёткое изображение\n• Нет авторизации\n" +
+                "• Ошибка смарт-карты\n• Не работает LAN\n• Нет сигнала\n• Посторонние звуки\n" +
+                "• Запах гари\n• Не работает разъем HDMI\n• Не работает разъем 3RCA\n• Замена на модель с HDMI";
+    }
 }

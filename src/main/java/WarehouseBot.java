@@ -385,22 +385,51 @@ public class WarehouseBot extends TelegramLongPollingBot {
         }
     }
 
-    private void sendUsersToolSummaryMenu(long chatId) {
+    private void sendUsersToolSummaryMenu(long chatId, Integer messageId, String alertText) {
         List<String[]> users = DatabaseManager.getUsersWithToolCounts();
-        if (users.isEmpty()) { sendMenu(chatId, "ADMIN", "ℹ️ Инструмента на руках нет."); return; }
+        StringBuilder sb = new StringBuilder();
+        if (alertText != null && !alertText.isEmpty()) sb.append(alertText).append("\n\n➖➖➖➖➖➖➖➖➖➖\n");
+
+        if (users.isEmpty()) {
+            sb.append("ℹ️ Инструмента на руках нет.");
+            if (messageId != null) editToolManagementMenu(chatId, messageId, sb.toString());
+            else sendToolManagementMenu(chatId, sb.toString());
+            return;
+        }
+
+        sb.append("👤 <b>Сводка по людям</b>\nВыберите сотрудника:");
         InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
         List<List<InlineKeyboardButton>> rows = new ArrayList<>();
         for (String[] u : users) rows.add(List.of(createBtn(String.format("👤 %s (%s шт.)", u[1], u[2]), "T_SUMM_U:" + u[0])));
-        rows.add(List.of(createBtn("🔙 Назад", "TOOL_MAIN_MENU")));
+        rows.add(List.of(createBtn("🔙 Назад", "tool_menu_main")));
         markup.setKeyboard(rows);
-        SendMessage msg = new SendMessage(String.valueOf(chatId), "👤 <b>Сводка по людям</b>\nВыберите сотрудника:");
-        msg.setParseMode("HTML"); msg.setReplyMarkup(markup); try { execute(msg); } catch (TelegramApiException e) {}
+
+        if (messageId == null) {
+            SendMessage msg = new SendMessage(String.valueOf(chatId), sb.toString());
+            msg.setParseMode("HTML"); msg.setReplyMarkup(markup);
+            try { execute(msg); } catch (TelegramApiException e) {}
+        } else {
+            EditMessageText edit = new EditMessageText();
+            edit.setChatId(String.valueOf(chatId)); edit.setMessageId(messageId);
+            edit.setText(sb.toString()); edit.setParseMode("HTML"); edit.setReplyMarkup(markup);
+            try { execute(edit); } catch (TelegramApiException e) {}
+        }
     }
 
-    private void sendUserToolSummary(long chatId, long targetUserId) {
+    private void sendUserToolSummary(long chatId, long targetUserId, Integer messageId, String alertText) {
         List<String[]> tools = DatabaseManager.getUserAssignedToolsForReturn(targetUserId);
         String userName = DatabaseManager.getUserFullName(targetUserId);
-        if (tools.isEmpty()) { sendMenu(chatId, "ADMIN", "ℹ️ У <b>" + userName + "</b> нет инструмента."); sendUsersToolSummaryMenu(chatId); return; }
+
+        StringBuilder sb = new StringBuilder();
+        if (alertText != null && !alertText.isEmpty()) sb.append(alertText).append("\n\n➖➖➖➖➖➖➖➖➖➖\n");
+
+        if (tools.isEmpty()) {
+            sb.append("ℹ️ У <b>").append(userName).append("</b> нет инструмента.");
+            sendUsersToolSummaryMenu(chatId, messageId, sb.toString());
+            return;
+        }
+
+        sb.append("👤 <b>Инструмент: ").append(userName).append("</b>");
         InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
         List<List<InlineKeyboardButton>> rows = new ArrayList<>();
         for (String[] t : tools) {
@@ -408,10 +437,19 @@ public class WarehouseBot extends TelegramLongPollingBot {
             rows.add(List.of(createBtn(String.format("↩️ Забрать: %s%s", t[1].length() > 15 ? t[1].substring(0, 15) + "…" : t[1], inv), "T_SUMM_RET:" + t[0] + ":" + targetUserId)));
         }
         rows.add(List.of(createBtn("🚨 Вернуть ВСЁ на склад", "T_SUMM_RALL:" + targetUserId)));
-        rows.add(List.of(createBtn("🔙 Назад к списку", "TOOL_MENU_AUDIT_USERS")));
+        rows.add(List.of(createBtn("🔙 Назад к списку", "tool_menu_audit_users")));
         markup.setKeyboard(rows);
-        SendMessage msg = new SendMessage(String.valueOf(chatId), "👤 <b>Инструмент: " + userName + "</b>");
-        msg.setParseMode("HTML"); msg.setReplyMarkup(markup); try { execute(msg); } catch (TelegramApiException e) {}
+
+        if (messageId == null) {
+            SendMessage msg = new SendMessage(String.valueOf(chatId), sb.toString());
+            msg.setParseMode("HTML"); msg.setReplyMarkup(markup);
+            try { execute(msg); } catch (TelegramApiException e) {}
+        } else {
+            EditMessageText edit = new EditMessageText();
+            edit.setChatId(String.valueOf(chatId)); edit.setMessageId(messageId);
+            edit.setText(sb.toString()); edit.setParseMode("HTML"); edit.setReplyMarkup(markup);
+            try { execute(edit); } catch (TelegramApiException e) {}
+        }
     }
 
     private void sendAvailableToolsForAssignment(long chatId, Integer messageId) {
@@ -1387,18 +1425,16 @@ public class WarehouseBot extends TelegramLongPollingBot {
 
             if (data.startsWith("tool_menu_")) {
                 switch (data) {
-                    case "tool_menu_main" -> editToolManagementMenu(chatId, messageId);
-                    case "tool_menu_close" -> {
-                        DeleteMessage delete = new DeleteMessage(String.valueOf(chatId), messageId);
-                        try { execute(delete); } catch (Exception e) {}
+                    case "tool_menu_main" -> {
+                        waitingToolWriteOffReason.remove(chatId);
+                        editToolManagementMenu(chatId, messageId);
                     }
-
-                    // --- ТЕКСТОВЫЕ РАЗДЕЛЫ (Открываются прямо в этом же сообщении) ---
+                    case "tool_menu_close" -> {
+                        try { execute(new DeleteMessage(String.valueOf(chatId), messageId)); } catch (Exception e) {}
+                    }
                     case "tool_menu_audit" -> {
                         try { execute(new DeleteMessage(String.valueOf(chatId), messageId)); } catch (Exception e) {}
-                        // Выводим большую сводку старым методом (он умеет резать текст на части)
                         sendMenu(chatId, role, DatabaseManager.getToolsAuditText());
-                        // И сразу возвращаем панель управления вниз для удобства
                         sendToolManagementMenu(chatId);
                     }
                     case "tool_menu_archive" -> {
@@ -1412,18 +1448,13 @@ public class WarehouseBot extends TelegramLongPollingBot {
                         int successCount = 0;
                         for (Long workerId : workersWithMaterials) {
                             try {
-                                SendMessage msg = new SendMessage(String.valueOf(workerId), "⚠ <b>ВНИМАНИЕ: АУДИТ ОСТАТКОВ!</b> ⚠️\n\nНапоминаем о необходимости закрыть подотчет до конца месяца. Пожалуйста, <b>спишите</b> использованные материалы в квитанции или <b>верните</b> остатки на склад!\n\n" + DatabaseManager.getUserBalanceText(workerId));
+                                SendMessage msg = new SendMessage(String.valueOf(workerId), "⚠ <b>ВНИМАНИЕ: АУДИТ ОСТАТКОВ!</b> ⚠️\n\nНапоминаем о необходимости закрыть подотчет до конца месяца. Пожалуйста, <b>спишите</b> или <b>верните</b> материалы.\n\n" + DatabaseManager.getUserBalanceText(workerId));
                                 msg.setParseMode("HTML"); execute(msg); successCount++;
                             } catch (TelegramApiException e) {}
                         }
                         showToolMenuSection(chatId, messageId, "✅ Уведомления об аудите успешно доставлены <b>" + successCount + "</b> сотрудникам!");
                     }
-
-                    // --- ИНТЕРАКТИВНЫЕ РАЗДЕЛЫ (Удаляют главное меню и запускают ваши старые методы) ---
-                    case "tool_menu_audit_users" -> {
-                        try { execute(new DeleteMessage(String.valueOf(chatId), messageId)); } catch (Exception e) {}
-                        sendUsersToolSummaryMenu(chatId);
-                    }
+                    case "tool_menu_audit_users" -> sendUsersToolSummaryMenu(chatId, messageId, null);
                     case "tool_menu_give" -> sendAvailableToolsForAssignment(chatId, messageId);
                     case "tool_menu_return" -> sendUsersForToolReturn(chatId, messageId);
                     case "tool_menu_restore" -> sendToolsForRestore(chatId, messageId);
@@ -1439,6 +1470,65 @@ public class WarehouseBot extends TelegramLongPollingBot {
                         try { execute(edit); } catch (Exception e) {}
                     }
                 }
+                return;
+            }
+
+            if (data.startsWith("T_SUMM_U:") && "ADMIN".equals(role)) {
+                sendUserToolSummary(chatId, Long.parseLong(data.split(":")[1]), messageId, null);
+                return;
+            }
+            if (data.startsWith("T_SUMM_RET:") && "ADMIN".equals(role)) {
+                String[] parts = data.split(":");
+                String res = DatabaseManager.returnToolToWarehouse(Integer.parseInt(parts[1]));
+                sendUserToolSummary(chatId, Long.parseLong(parts[2]), messageId, res);
+                return;
+            }
+            if (data.startsWith("T_SUMM_RALL:") && "ADMIN".equals(role)) {
+                String res = DatabaseManager.returnAllUserToolsToWarehouse(Long.parseLong(data.split(":")[1]));
+                sendUsersToolSummaryMenu(chatId, messageId, res);
+                return;
+            }
+
+            if (data.startsWith("T_SEL_N:") && "ADMIN".equals(role)) { sendUsersForToolAssignment(chatId, Integer.parseInt(data.split(":")[1]), messageId); return; }
+            if (data.startsWith("T_ASS_U:") && "ADMIN".equals(role)) {
+                String[] parts = data.split(":");
+                long targetUserId = Long.parseLong(parts[2]);
+                String result = DatabaseManager.assignTool(Integer.parseInt(parts[1]), targetUserId);
+                editToolManagementMenu(chatId, messageId, result);
+                if (result.startsWith("✅") && targetUserId != chatId) sendDirectNotification(targetUserId, "🔔 <b>Вам выдан новый инструмент!</b>\nМОЛ закрепил за вами новую позицию.");
+                return;
+            }
+
+            if (data.startsWith("T_RET_U:") && "ADMIN".equals(role)) { sendUserToolsForReturn(chatId, Long.parseLong(data.split(":")[1]), messageId); return; }
+            if (data.startsWith("T_RET_T:") && "ADMIN".equals(role)) {
+                String res = DatabaseManager.returnToolToWarehouse(Integer.parseInt(data.split(":")[1]));
+                editToolManagementMenu(chatId, messageId, res);
+                return;
+            }
+
+            if (data.startsWith("T_WO_LOC:") && "ADMIN".equals(role)) {
+                if (data.split(":")[1].equals("STOCK")) sendGroupsForToolWriteOff(chatId, messageId);
+                else sendUsersForToolWriteOff(chatId, messageId);
+                return;
+            }
+            if (data.startsWith("T_WO_U:") && "ADMIN".equals(role)) { sendUserToolsForWriteOff(chatId, Long.parseLong(data.split(":")[1]), messageId); return; }
+            if (data.startsWith("T_WO_G:") && "ADMIN".equals(role)) { sendSpecificToolsInStockForWriteOff(chatId, Integer.parseInt(data.split(":")[1]), messageId); return; }
+            if (data.startsWith("T_WO_DO:") && "ADMIN".equals(role)) {
+                int toolId = Integer.parseInt(data.split(":")[1]);
+                waitingToolWriteOffReason.put(chatId, toolId);
+
+                InlineKeyboardMarkup markup = new InlineKeyboardMarkup(List.of(List.of(createBtn("❌ Отменить", "tool_menu_main"))));
+                EditMessageText edit = new EditMessageText();
+                edit.setChatId(String.valueOf(chatId)); edit.setMessageId(messageId);
+                edit.setText("✍️ Выбран инструмент: <b>" + DatabaseManager.getToolNameAndInvById(toolId) + "</b>\n\nВведите <b>причину списания</b> (например: утерян, сломался):");
+                edit.setParseMode("HTML"); edit.setReplyMarkup(markup);
+                try { execute(edit); } catch (Exception e) {}
+                return;
+            }
+
+            if (data.startsWith("T_RES_DO:") && "ADMIN".equals(role)) {
+                String res = DatabaseManager.restoreToolToStock(Integer.parseInt(data.split(":")[1]));
+                editToolManagementMenu(chatId, messageId, res);
                 return;
             }
 
@@ -2133,101 +2223,6 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 return;
             }
 
-            // ==========================================
-            // НАЧАЛО: ЧИСТЫЙ БЛОК УПРАВЛЕНИЯ ИНСТРУМЕНТОМ
-            // ==========================================
-            if (data.equals("TOOL_MAIN_MENU") && "ADMIN".equals(role)) {
-                try { execute(new DeleteMessage(String.valueOf(chatId), messageId)); } catch (Exception e) {}
-                sendToolManagementMenu(chatId);
-                return;
-            }
-            if (data.equals("TOOL_MENU_AUDIT_ALL") && "ADMIN".equals(role)) {
-                sendMenu(chatId, role, DatabaseManager.getToolsAuditText());
-                return;
-            }
-            if (data.equals("TOOL_MENU_AUDIT_USERS") && "ADMIN".equals(role)) {
-                sendUsersToolSummaryMenu(chatId);
-                return;
-            }
-            if (data.equals("TOOL_MENU_AUDIT_NOTIFY") && "ADMIN".equals(role)) {
-                try { execute(new DeleteMessage(String.valueOf(chatId), messageId)); } catch (Exception e) {}
-                sendMenu(chatId, role, "⏳ Начинаю рассылку уведомлений...");
-                List<Long> workersWithMaterials = DatabaseManager.getUsersWithBalances();
-                int successCount = 0;
-                for (Long workerId : workersWithMaterials) {
-                    try {
-                        SendMessage msg = new SendMessage(String.valueOf(workerId), "⚠ <b>ВНИМАНИЕ: АУДИТ ОСТАТКОВ!</b> ⚠️\n\nНапоминаем о необходимости закрыть подотчет до конца месяца. Пожалуйста, <b>спишите</b> использованные материалы в квитанции или <b>верните</b> остатки на склад!\n\n" + DatabaseManager.getUserBalanceText(workerId));
-                        msg.setParseMode("HTML"); execute(msg); successCount++;
-                    } catch (TelegramApiException e) {}
-                }
-                sendMenu(chatId, role, "✅ Уведомления об аудите успешно доставлены <b>" + successCount + "</b> сотрудникам!");
-                sendToolManagementMenu(chatId);
-                return;
-            }
-            if (data.startsWith("T_SUMM_U:") && "ADMIN".equals(role)) { sendUserToolSummary(chatId, Long.parseLong(data.split(":")[1])); return; }
-            if (data.startsWith("T_SUMM_RET:") && "ADMIN".equals(role)) {
-                String[] parts = data.split(":");
-                DatabaseManager.returnToolToWarehouse(Integer.parseInt(parts[1]));
-                AnswerCallbackQuery answer = new AnswerCallbackQuery();
-                answer.setCallbackQueryId(update.getCallbackQuery().getId());
-                answer.setText("✅ Инструмент возвращен!"); answer.setShowAlert(false);
-                try { execute(answer); } catch (TelegramApiException e) {}
-                sendUserToolSummary(chatId, Long.parseLong(parts[2])); return;
-            }
-            if (data.startsWith("T_SUMM_RALL:") && "ADMIN".equals(role)) {
-                sendMenu(chatId, role, DatabaseManager.returnAllUserToolsToWarehouse(Long.parseLong(data.split(":")[1])));
-                sendUsersToolSummaryMenu(chatId); return;
-            }
-
-            // --- ВЫДАЧА ---
-            if (data.startsWith("T_SEL_N:") && "ADMIN".equals(role)) { sendUsersForToolAssignment(chatId, Integer.parseInt(data.split(":")[1]), messageId); return; }
-            if (data.startsWith("T_ASS_U:") && "ADMIN".equals(role)) {
-                try { execute(new DeleteMessage(String.valueOf(chatId), messageId)); } catch (Exception e) {}
-                String[] parts = data.split(":");
-                long targetUserId = Long.parseLong(parts[2]);
-                String result = DatabaseManager.assignTool(Integer.parseInt(parts[1]), targetUserId);
-                sendMenu(chatId, role, result);
-                sendToolManagementMenu(chatId);
-                if (result.startsWith("✅") && targetUserId != chatId) sendDirectNotification(targetUserId, "🔔 <b>Вам выдан новый инструмент!</b>\nМОЛ закрепил за вами новую позицию.");
-                return;
-            }
-
-            // --- ВОЗВРАТ ---
-            if (data.startsWith("T_RET_U:") && "ADMIN".equals(role)) { sendUserToolsForReturn(chatId, Long.parseLong(data.split(":")[1]), messageId); return; }
-            if (data.startsWith("T_RET_T:") && "ADMIN".equals(role)) {
-                try { execute(new DeleteMessage(String.valueOf(chatId), messageId)); } catch (Exception e) {}
-                sendMenu(chatId, role, DatabaseManager.returnToolToWarehouse(Integer.parseInt(data.split(":")[1])));
-                sendToolManagementMenu(chatId);
-                return;
-            }
-
-            // --- СПИСАНИЕ ---
-            if (data.startsWith("T_WO_LOC:") && "ADMIN".equals(role)) {
-                if (data.split(":")[1].equals("STOCK")) sendGroupsForToolWriteOff(chatId, messageId);
-                else sendUsersForToolWriteOff(chatId, messageId);
-                return;
-            }
-            if (data.startsWith("T_WO_U:") && "ADMIN".equals(role)) { sendUserToolsForWriteOff(chatId, Long.parseLong(data.split(":")[1]), messageId); return; }
-            if (data.startsWith("T_WO_G:") && "ADMIN".equals(role)) { sendSpecificToolsInStockForWriteOff(chatId, Integer.parseInt(data.split(":")[1]), messageId); return; }
-            if (data.startsWith("T_WO_DO:") && "ADMIN".equals(role)) {
-                try { execute(new DeleteMessage(String.valueOf(chatId), messageId)); } catch (Exception e) {}
-                int toolId = Integer.parseInt(data.split(":")[1]);
-                waitingToolWriteOffReason.put(chatId, toolId);
-                sendCancelKeyboard(chatId, "✍️ Выбран инструмент: <b>" + DatabaseManager.getToolNameAndInvById(toolId) + "</b>\n\nВведите <b>причину списания</b> (например: утерян, сломался):");
-                return;
-            }
-
-            // --- ВОССТАНОВЛЕНИЕ ИЗ АРХИВА ---
-            if (data.startsWith("T_RES_DO:") && "ADMIN".equals(role)) {
-                try { execute(new DeleteMessage(String.valueOf(chatId), messageId)); } catch (Exception e) {}
-                sendMenu(chatId, role, DatabaseManager.restoreToolToStock(Integer.parseInt(data.split(":")[1])));
-                sendToolManagementMenu(chatId);
-                return;
-            }
-            // ==========================================
-            // КОНЕЦ: ЧИСТЫЙ БЛОК УПРАВЛЕНИЯ ИНСТРУМЕНТОМ
-            // ==========================================
-
             if (data.startsWith("NEW_USER_APP:") && "ADMIN".equals(role)) {
                 long targetId = Long.parseLong(data.split(":")[1]);
                 DatabaseManager.setBanStatus(targetId, false);
@@ -2797,8 +2792,9 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 return;
             }
             if (waitingToolWriteOffReason.containsKey(chatId)) {
-                sendMenu(chatId, role, DatabaseManager.writeOffTool(waitingToolWriteOffReason.remove(chatId), text));
-                sendToolManagementMenu(chatId);
+                String res = DatabaseManager.writeOffTool(waitingToolWriteOffReason.remove(chatId), text);
+                clearChatHistory(chatId); // Удаляет и сообщение юзера, и окно вопроса
+                sendToolManagementMenu(chatId, res); // Заново шлет меню с уведомлением сверху!
                 return;
             }
             if (writeOffSessions.containsKey(chatId)) { handleWriteOffStep(chatId, firstName, role, text); return; }
@@ -3382,9 +3378,19 @@ public class WarehouseBot extends TelegramLongPollingBot {
 
     // 1. Отправка новой панели управления
     private void sendToolManagementMenu(long chatId) {
+        sendToolManagementMenu(chatId, null);
+    }
+
+    private void sendToolManagementMenu(long chatId, String alertText) {
+        StringBuilder sb = new StringBuilder();
+        if (alertText != null && !alertText.isEmpty()) {
+            sb.append(alertText).append("\n\n➖➖➖➖➖➖➖➖➖➖\n");
+        }
+        sb.append("🧰 <b>Панель управления инструментом</b>\nВыберите нужное действие:");
+
         SendMessage message = new SendMessage();
         message.setChatId(String.valueOf(chatId));
-        message.setText("🧰 <b>Панель управления инструментом</b>\nВыберите нужное действие:");
+        message.setText(sb.toString());
         message.setParseMode("HTML");
         message.setReplyMarkup(getToolMenuInlineMarkup());
         try { execute(message); } catch (Exception e) { e.printStackTrace(); }
@@ -3392,10 +3398,20 @@ public class WarehouseBot extends TelegramLongPollingBot {
 
     // 2. Возврат в главное меню панели
     private void editToolManagementMenu(long chatId, int messageId) {
+        editToolManagementMenu(chatId, messageId, null);
+    }
+
+    private void editToolManagementMenu(long chatId, int messageId, String alertText) {
+        StringBuilder sb = new StringBuilder();
+        if (alertText != null && !alertText.isEmpty()) {
+            sb.append(alertText).append("\n\n➖➖➖➖➖➖➖➖➖➖\n");
+        }
+        sb.append("🧰 <b>Панель управления инструментом</b>\nВыберите нужное действие:");
+
         EditMessageText edit = new EditMessageText();
         edit.setChatId(String.valueOf(chatId));
         edit.setMessageId(messageId);
-        edit.setText("🧰 <b>Панель управления инструментом</b>\nВыберите нужное действие:");
+        edit.setText(sb.toString());
         edit.setParseMode("HTML");
         edit.setReplyMarkup(getToolMenuInlineMarkup());
         try { execute(edit); } catch (Exception e) { e.printStackTrace(); }

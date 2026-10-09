@@ -45,6 +45,9 @@ public class DatabaseManager {
                         );
                     """);
 
+            stmt.execute("CREATE INDEX IF NOT EXISTS idx_sched_v2_name ON schedules_v2(excel_name);");
+            stmt.execute("CREATE INDEX IF NOT EXISTS idx_tools_assigned ON tools(assigned_to);");
+
             stmt.execute("""
     CREATE TABLE IF NOT EXISTS tm_accounts (
         chat_id INTEGER PRIMARY KEY,
@@ -527,16 +530,81 @@ public class DatabaseManager {
         return "Неизвестный аппарат";
     }
 
-    // =========================================================================
-    // ОСТАЛЬНОЙ СТАРЫЙ КОД (БЕЗ ИЗМЕНЕНИЙ)
-    // =========================================================================
-
     public static String saveImportedMaterials(List<ExcelImporter.MaterialRow> rows) {
         try (Connection conn = getConnection()) {
+
+            // --- ШАГ 1: Собираем текущие остатки на руках у мастеров ---
+            Map<String, Double> onHandsMap = new HashMap<>();
+            Map<String, String> whoHoldsMap = new HashMap<>();
+
+            String checkSql = """
+                SELECT m.code, m.name, u.full_name, b.quantity
+                FROM employee_balances b
+                JOIN materials m ON b.material_id = m.id
+                JOIN users u ON b.user_id = u.id
+                WHERE b.quantity > 0.00001
+            """;
+
+            try (Statement stmt = conn.createStatement(); ResultSet rs = stmt.executeQuery(checkSql)) {
+                while (rs.next()) {
+                    String code = rs.getString("code");
+                    String worker = rs.getString("full_name");
+                    double qty = rs.getDouble("quantity");
+
+                    onHandsMap.put(code, onHandsMap.getOrDefault(code, 0.0) + qty);
+
+                    String holderInfo = worker + " (" + fmtQty(qty) + ")";
+                    whoHoldsMap.put(code, whoHoldsMap.containsKey(code) ? whoHoldsMap.get(code) + ", " + holderInfo : holderInfo);
+                }
+            }
+
+            // --- ШАГ 2: Сверка с новой Excel-ведомостью ---
+            StringBuilder errorReport = new StringBuilder();
+            boolean hasErrors = false;
+            int errorCount = 0;
+
+            // Суммируем всё, что пришло из Excel по кодам
+            Map<String, Double> excelQtyMap = new HashMap<>();
+            for (ExcelImporter.MaterialRow r : rows) {
+                excelQtyMap.put(r.code, excelQtyMap.getOrDefault(r.code, 0.0) + r.qty);
+            }
+
+            // Проверяем: не превышают ли остатки на руках общие объемы из бухгалтерии?
+            for (Map.Entry<String, Double> entry : onHandsMap.entrySet()) {
+                String code = entry.getKey();
+                double handsQty = entry.getValue();
+                double excelQty = excelQtyMap.getOrDefault(code, 0.0);
+
+                if (handsQty > excelQty + 1e-9) {
+                    hasErrors = true;
+                    if (errorCount < 20) { // Ограничиваем вывод, чтобы сообщение не было слишком огромным
+                        errorReport.append("🚨 Инв. № <code>").append(code).append("</code>\n")
+                                .append("По новой ведомости: <b>").append(fmtQty(excelQty)).append("</b>\n")
+                                .append("У мастеров на руках: <b>").append(fmtQty(handsQty)).append("</b>\n")
+                                .append("Кто держит: <i>").append(whoHoldsMap.get(code)).append("</i>\n\n");
+                    }
+                    errorCount++;
+                }
+            }
+
+            // Если есть расхождения — отменяем импорт и бьем тревогу!
+            if (hasErrors) {
+                String header = "❌ <b>ОШИБКА ИМПОРТА: НЕДОСТАЧА ПО БУХГАЛТЕРИИ!</b>\n\n" +
+                        "Материалы ниже числятся у мастеров, но в новой ведомости их меньше (или вообще нет). " +
+                        "Заставьте мастеров списать эти материалы перед загрузкой ведомости:\n\n";
+                if (errorCount > 20) {
+                    errorReport.append("\n<i>... и еще ").append(errorCount - 20).append(" проблемных позиций.</i>");
+                }
+                return header + errorReport.toString().trim();
+            }
+
+            // --- ШАГ 3: Если всё сходится, обновляем базу ---
             conn.setAutoCommit(false);
+
             try (Statement stmt = conn.createStatement()) {
                 stmt.execute("UPDATE materials SET warehouse_qty = 0, start_qty = 0, in_qty = 0, out_qty = 0, start_sum = 0, end_sum = 0;");
             }
+
             String sql = """
                         INSERT INTO materials (
                             account_number, code, name, original_unit, work_unit, 
@@ -561,6 +629,10 @@ public class DatabaseManager {
 
             try (PreparedStatement ps = conn.prepareStatement(sql)) {
                 for (ExcelImporter.MaterialRow r : rows) {
+                    double handsQty = onHandsMap.getOrDefault(r.code, 0.0);
+                    // Вычисляем чистый остаток для свободного склада
+                    double actualWarehouseQty = Math.max(0, r.qty - handsQty);
+
                     ps.setString(1, r.account);
                     ps.setString(2, r.code);
                     ps.setString(3, r.name);
@@ -568,7 +640,7 @@ public class DatabaseManager {
                     ps.setString(5, r.workUnit);
                     ps.setDouble(6, r.convFactor);
                     ps.setDouble(7, r.priceWithVat);
-                    ps.setDouble(8, r.qty);
+                    ps.setDouble(8, actualWarehouseQty); // Кладем на склад только то, что свободно
                     ps.setString(9, r.batchInfo != null ? r.batchInfo : "");
                     ps.setDouble(10, r.startQty);
                     ps.setDouble(11, r.startSum);
@@ -579,7 +651,8 @@ public class DatabaseManager {
                 }
             }
             conn.commit();
-            return "✅ <b>Оборотная ведомость успешно загружена!</b>\nУмный конвертер единиц (км ➔ м, тыс.шт ➔ шт, гильзы уп ➔ шт) сработал корректно.";
+            return "✅ <b>Оборотная ведомость успешно загружена! (Умный импорт)</b>\nКоличество материалов на руках у сотрудников было проверено и автоматически вычтено из свободных остатков на складе.";
+
         } catch (SQLException e) {
             e.printStackTrace();
             return "❌ Ошибка базы данных при сохранении ведомости: " + e.getMessage();
@@ -1479,10 +1552,11 @@ public class DatabaseManager {
                                 String pEnd = rsAll.getString("end_time");
 
                                 boolean partnerIsSecondShift = false;
-                                if (pEnd != null && (pEnd.contains("21:00") || pEnd.contains("21.00")))
+                                if (pEnd != null && !pEnd.isEmpty() && (pEnd.contains("21:00") || pEnd.contains("21.00"))) {
                                     partnerIsSecondShift = true;
-                                else if (pStart != null && (pStart.startsWith("11:") || pStart.startsWith("12:") || pStart.startsWith("13:") || pStart.startsWith("14:")))
+                                } else if (pStart != null && !pStart.isEmpty() && (pStart.startsWith("11:") || pStart.startsWith("12:") || pStart.startsWith("13:") || pStart.startsWith("14:"))) {
                                     partnerIsSecondShift = true;
+                                }
 
                                 if (isSaturday || (isSecondShift && partnerIsSecondShift))
                                     allWorkersThisShift.add(pName);

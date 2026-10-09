@@ -1564,7 +1564,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
             // 5. СБРОС ЗАВИСШИХ ЗАЯВОК (БЫВШИЙ /fix)
             if (data.equals("ADM_PANEL_FIX_REQ") && "ADMIN".equals(role)) {
                 try (Connection conn = DatabaseManager.getConnection(); Statement stmt = conn.createStatement()) {
-                    stmt.execute("DELETE FROM return_requests");
+                    stmt.execute("DELETE FROM return_requests WHERE status = 'PENDING'");
                     EditMessageText edit = new EditMessageText();
                     edit.setChatId(String.valueOf(chatId)); edit.setMessageId(messageId);
                     edit.setText("✅ <b>Все зависшие заявки на возврат успешно очищены!</b>");
@@ -1789,6 +1789,8 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 edit.setChatId(String.valueOf(chatId));
                 edit.setMessageId(update.getCallbackQuery().getMessage().getMessageId());
                 edit.setText((approve ? "✅ Подтверждено: " : "❌ Отклонено: ") + excelName + ", " + displayDate);
+                // 👇 ДОБАВЛЕНА ЭТА СТРОКА:
+                edit.setReplyMarkup(new InlineKeyboardMarkup(List.of(List.of(createBtn("❌ Закрыть", "GENERIC_CLOSE")))));
                 try { execute(edit); } catch (TelegramApiException e) {}
 
                 try { execute(answer); } catch (TelegramApiException e) {}
@@ -2997,7 +2999,11 @@ public class WarehouseBot extends TelegramLongPollingBot {
                             java.time.LocalDate end = parseSmartDate(parts[1].trim(), currentYear, currentMonth);
 
                             if (start.isAfter(end)) {
-                                end = end.plusYears(1); // Переход через Новый год
+                                if (start.getMonthValue() == 12 && end.getMonthValue() == 1) {
+                                    end = end.plusYears(1); // Легитимный переход через Новый год
+                                } else {
+                                    throw new Exception("Начальная дата больше конечной"); // Опечатка
+                                }
                             }
 
                             java.time.LocalDate current = start;
@@ -3333,7 +3339,8 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 case "/fix" -> {
                     if ("ADMIN".equals(role)) {
                         try (java.sql.Connection conn = DatabaseManager.getConnection(); java.sql.Statement stmt = conn.createStatement()) {
-                            stmt.execute("DELETE FROM return_requests"); sendMenu(chatId, role, "✅ Зависшие заявки очищены!");
+                            stmt.execute("DELETE FROM return_requests WHERE status = 'PENDING'");
+                            sendMenu(chatId, role, "✅ Зависшие заявки очищены!");
                         } catch (Exception e) { e.printStackTrace(); }
                     }
                 }

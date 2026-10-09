@@ -40,7 +40,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
     private final Map<Long, Integer> waitingOrshProblemReason = new HashMap<>();
     private final Map<Long, Integer> waitingDirContactCat = new HashMap<>();
     private final Map<Long, Boolean> waitingNewEmployeeName = new ConcurrentHashMap<>();
-    private final Map<Long, Boolean> waitingSickLeaveDate = new ConcurrentHashMap<>();
+    private final Map<Long, Integer> waitingSickLeaveDate = new ConcurrentHashMap<>();
     private final Map<Long, String> tmAuthStep = new HashMap<>();
     private final Map<Long, String> waitingTmReportTaskId = new HashMap<>();
     private final Map<Long, String> tmTempLogin = new HashMap<>();
@@ -1250,6 +1250,11 @@ public class WarehouseBot extends TelegramLongPollingBot {
             }
 
             if (data.equals("SCHED_MAIN")) {
+                // Очищаем память, если мы вернулись назад из других меню
+                waitingSickLeaveDate.remove(chatId);
+                waitingScheduleEditUser.remove(chatId);
+                waitingScheduleEditDate.remove(chatId);
+
                 sendScheduleMenu(chatId, role, "🗓 <b>Графики и смены:</b>\nВыберите, что хотите посмотреть:", messageId);
                 return;
             }
@@ -1316,10 +1321,22 @@ public class WarehouseBot extends TelegramLongPollingBot {
             }
             if (data.equals("SCHED_SICK")) {
                 String excelName = DatabaseManager.getUserExcelName(chatId);
-                if (excelName == null) { sendClosableMessage(chatId, "ℹ Вы не привязаны к графику."); }
-                else {
-                    waitingSickLeaveDate.put(chatId, true);
-                    sendCancelKeyboard(chatId, "🤒 <b>Оформление больничного</b>\n\nВы оформляете больничный для: <b>" + excelName + "</b>\n\n<i>Пример 1:</i> <code>15.10.2026</code>\n<i>Пример 2:</i> <code>15.10.2026-22.10.2026</code>");
+                if (excelName == null) {
+                    sendScheduleMenu(chatId, role, "ℹ️ Вы не привязаны к графику.", messageId);
+                } else {
+                    waitingSickLeaveDate.put(chatId, messageId); // Запоминаем ID окна для SPA
+
+                    // Используем кнопку Назад, чтобы не убивать меню, а возвращаться
+                    InlineKeyboardMarkup markup = new InlineKeyboardMarkup(List.of(List.of(createBtn("🔙 Назад", "SCHED_MAIN"))));
+
+                    // Жестко используем EditMessageText для изменения текущего пузыря
+                    EditMessageText edit = new EditMessageText();
+                    edit.setChatId(String.valueOf(chatId));
+                    edit.setMessageId(messageId);
+                    edit.setText("🤒 <b>Оформление больничного</b>\n\nВы оформляете больничный для: <b>" + excelName + "</b>\n\nНапишите дни болезни.\n\n<i>Можно писать без года:</i> <code>15.11</code>\n<i>Диапазоны:</i> <code>15.10-22.10</code>\n<i>Даже через запятую:</i> <code>10.11, 14.11-19.11</code>");
+                    edit.setParseMode("HTML");
+                    edit.setReplyMarkup(markup);
+                    try { execute(edit); } catch (Exception e) {}
                 }
                 return;
             }
@@ -1758,6 +1775,11 @@ public class WarehouseBot extends TelegramLongPollingBot {
                     }
                     DatabaseManager.updateSickLeaveRequestStatus(requestId, "APPROVED");
                     sendDirectNotification(empChatId, "✅ Ваш больничный (" + displayDate + ") подтвержден руководителем и внесен в график.");
+
+                    // --- НОВОЕ: Уведомляем Козлова и Белевича ТОЛЬКО ПОСЛЕ одобрения админом ---
+                    String managerMsg = "🚨 <b>ВНИМАНИЕ: Больничный!</b>\nСотрудник <b>" + excelName + "</b> уходит на больничный.\nПериод: <b>" + displayDate + "</b>\n<i>Администратор одобрил, график обновлен.</i>";
+                    notifyManagersAboutSickLeave(managerMsg);
+
                 } else {
                     DatabaseManager.updateSickLeaveRequestStatus(requestId, "REJECTED");
                     sendDirectNotification(empChatId, "❌ Ваш больничный (" + displayDate + ") отклонен руководителем. Обратитесь к нему за разъяснением.");
@@ -2187,7 +2209,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 InlineKeyboardMarkup markup = new InlineKeyboardMarkup(List.of(List.of(createBtn("❌ Отменить", "CANCEL_PROMPT"))));
                 EditMessageText edit = new EditMessageText();
                 edit.setChatId(String.valueOf(chatId)); edit.setMessageId(messageId);
-                edit.setText("✏️ Выбран сотрудник: <b>" + excelName + "</b>\n\nНапишите дату ИЛИ период дат, которые нужно изменить.\n\n<i>Пример 1:</i> <code>15.11.2026</code>\n<i>Пример 2:</i> <code>01.11.2026-07.11.2026</code>");
+                edit.setText("✏️ Выбран сотрудник: <b>" + excelName + "</b>\n\nНапишите дни, которые нужно изменить.\n\n<i>Можно писать без года:</i> <code>15.11</code>\n<i>Через запятую:</i> <code>10.11.2026, 15.11.26, 20.11</code>\n<i>Диапазоны:</i> <code>01.11-07.11</code>\n<i>Даже всё вместе:</i> <code>10.11, 14.11-19.11</code>");
                 edit.setParseMode("HTML"); edit.setReplyMarkup(markup);
                 try { execute(edit); } catch (Exception e) {}
                 return;
@@ -2212,45 +2234,34 @@ public class WarehouseBot extends TelegramLongPollingBot {
                     start = times[0]; end = times[1];
                 }
 
-                java.time.format.DateTimeFormatter dtf = java.time.format.DateTimeFormatter.ofPattern("dd.MM.yyyy");
-                java.time.LocalDate startDate;
-                java.time.LocalDate endDate;
-                String displayDate;
-
                 try {
-                    if (dateRangeStr.contains("-")) {
-                        String[] dParts = dateRangeStr.split("-");
-                        startDate = java.time.LocalDate.parse(dParts[0], dtf);
-                        endDate = java.time.LocalDate.parse(dParts[1], dtf);
-                        displayDate = "период с " + dateRangeStr.replace("-", " по ");
-                    } else {
-                        startDate = java.time.LocalDate.parse(dateRangeStr, dtf);
-                        endDate = startDate;
-                        displayDate = dateRangeStr;
-                    }
+                    java.time.format.DateTimeFormatter dtf = java.time.format.DateTimeFormatter.ofPattern("dd.MM.yyyy");
+                    String[] dateStrings = dateRangeStr.split(",");
 
-                    java.time.LocalDate current = startDate;
-                    while (!current.isAfter(endDate)) {
+                    int firstYear = 0;
+                    int firstMonth = 0;
+
+                    for (String ds : dateStrings) {
+                        java.time.LocalDate current = java.time.LocalDate.parse(ds, dtf);
                         DatabaseManager.updateSingleShift(targetUser, current.getYear(), current.getMonthValue(), current.getDayOfMonth(), statusCode, start, end);
-                        current = current.plusDays(1);
+                        if (firstYear == 0) { firstYear = current.getYear(); firstMonth = current.getMonthValue(); }
                     }
 
-                    // --- ИСПРАВЛЕНИЕ SPA: Передаем anchorMsgId в метод отрисовки графика, чтобы он обновил текущее окно ---
-                    sendScheduleView(chatId, targetUser, startDate.getYear(), startDate.getMonthValue(), false, anchorMsgId);
+                    // Обновляем окно графика, опираясь на первую измененную дату
+                    sendScheduleView(chatId, targetUser, firstYear, firstMonth, false, anchorMsgId);
 
                     Long targetUserId = DatabaseManager.getUserIdByExcelName(targetUser);
                     if (targetUserId != null) {
-                        sendDirectNotification(targetUserId, "⚠ <b>ВНИМАНИЕ!</b>\nАдминистратор изменил ваш график!\nДата: <b>" + displayDate + "</b>\nНовая смена/статус: <b>" + (statusCode.isEmpty() ? payload : statusCode) + "</b>");
+                        sendDirectNotification(targetUserId, "⚠ <b>ВНИМАНИЕ!</b>\nАдминистратор изменил ваш график!\nДата(ы): <b>" + (dateStrings.length > 2 ? dateStrings.length + " дн." : dateRangeStr) + "</b>\nНовая смена/статус: <b>" + (statusCode.isEmpty() ? payload : statusCode) + "</b>");
                     }
 
-                    // Показываем всплывающее уведомление об успехе
                     AnswerCallbackQuery ans = new AnswerCallbackQuery();
                     ans.setCallbackQueryId(update.getCallbackQuery().getId());
-                    ans.setText("✅ График изменен!");
+                    ans.setText("✅ График успешно изменен!");
                     try { execute(ans); } catch (Exception e) {}
 
                 } catch (Exception e) {
-                    sendMenu(chatId, role, "❌ Ошибка при обработке дат.");
+                    sendMenu(chatId, role, "❌ Ошибка при сохранении дат.");
                 }
                 return;
             }
@@ -2955,6 +2966,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 sendMenu(chatId, role, DatabaseManager.addNewEmployeeToSchedule(newName));
                 return;
             }
+
             if (waitingScheduleEditUser.containsKey(chatId)) {
                 String savedState = waitingScheduleEditUser.remove(chatId);
                 String[] stateParts = savedState.split(":");
@@ -2962,31 +2974,61 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 Integer anchorId = stateParts.length > 1 ? Integer.parseInt(stateParts[1]) : null;
 
                 String input = text.trim();
-                java.time.format.DateTimeFormatter dtf = java.time.format.DateTimeFormatter.ofPattern("dd.MM.yyyy");
-                String savedDateRange;
-                String displayDate;
+                java.time.format.DateTimeFormatter dtfFull = java.time.format.DateTimeFormatter.ofPattern("dd.MM.yyyy");
 
-                // БЛОК 1: Строгая проверка даты
+                int currentYear = java.time.LocalDate.now().getYear();
+                int currentMonth = java.time.LocalDate.now().getMonthValue();
+
+                List<java.time.LocalDate> targetDates = new ArrayList<>();
+                String displayDate = "";
+
                 try {
-                    if (input.contains("-")) {
-                        String[] parts = input.split("-");
-                        java.time.LocalDate start = java.time.LocalDate.parse(parts[0].trim(), dtf);
-                        java.time.LocalDate end = java.time.LocalDate.parse(parts[1].trim(), dtf);
-                        if (start.isAfter(end)) throw new Exception("Начальная дата больше конечной");
-                        savedDateRange = start.format(dtf) + "-" + end.format(dtf);
-                        displayDate = "с " + start.format(dtf) + " по " + end.format(dtf);
-                    } else {
-                        java.time.LocalDate date = java.time.LocalDate.parse(input, dtf);
-                        savedDateRange = date.format(dtf);
-                        displayDate = date.format(dtf);
+                    // Разбиваем строку по запятым, чтобы получить отдельные элементы (даты или диапазоны)
+                    String[] items = input.split(",");
+
+                    for (String item : items) {
+                        item = item.trim();
+                        if (item.isEmpty()) continue;
+
+                        if (item.contains("-")) {
+                            // Это диапазон
+                            String[] parts = item.split("-");
+                            java.time.LocalDate start = parseSmartDate(parts[0].trim(), currentYear, currentMonth);
+                            java.time.LocalDate end = parseSmartDate(parts[1].trim(), currentYear, currentMonth);
+
+                            if (start.isAfter(end)) {
+                                end = end.plusYears(1); // Переход через Новый год
+                            }
+
+                            java.time.LocalDate current = start;
+                            while (!current.isAfter(end)) {
+                                if (!targetDates.contains(current)) targetDates.add(current);
+                                current = current.plusDays(1);
+                            }
+                        } else {
+                            // Это одиночная дата
+                            java.time.LocalDate date = parseSmartDate(item, currentYear, currentMonth);
+                            if (!targetDates.contains(date)) targetDates.add(date);
+                        }
                     }
+
+                    if (targetDates.isEmpty()) throw new Exception("Не найдено ни одной даты");
+
+                    // Сортируем даты по порядку
+                    java.util.Collections.sort(targetDates);
+
+                    if (targetDates.size() == 1) {
+                        displayDate = targetDates.get(0).format(dtfFull);
+                    } else {
+                        displayDate = "выбранные дни (" + targetDates.size() + " шт.)";
+                    }
+
                 } catch (Exception e) {
-                    // Если дата реально кривая - редактируем окно с ошибкой
                     waitingScheduleEditUser.put(chatId, savedState);
                     if (anchorId != null) {
                         EditMessageText edit = new EditMessageText();
                         edit.setChatId(String.valueOf(chatId)); edit.setMessageId(anchorId);
-                        edit.setText("❌ <b>Неверный формат даты.</b>\nПример правильного ввода:\n<code>15.11.2026</code> ИЛИ <code>01.11.2026-07.11.2026</code>\n\nВведите дату еще раз:");
+                        edit.setText("❌ <b>Не удалось распознать дату.</b>\n\nВы можете писать в любых форматах (с годом и без):\n• Одиночно: <code>15.11</code> или <code>15.11.26</code> или <code>15.11.2026</code>\n• Диапазон: <code>01.11-07.11</code> или <code>01.11.26-07.11.2026</code>\n• Комбинировано: <code>10.11, 15.11-18.11, 20.11.26</code>\n\nВведите даты еще раз:");
                         edit.setParseMode("HTML");
                         edit.setReplyMarkup(new InlineKeyboardMarkup(List.of(List.of(createBtn("❌ Отменить", "CANCEL_PROMPT")))));
                         try { execute(edit); } catch (Exception ignored) {}
@@ -2994,14 +3036,22 @@ public class WarehouseBot extends TelegramLongPollingBot {
                     return;
                 }
 
-                // БЛОК 2: Если дата правильная - показываем кнопки выбора смены в ЭТОМ ЖЕ окне
-                waitingScheduleEditDate.put(chatId, targetUser + ":" + savedDateRange + (anchorId != null ? ":" + anchorId : ""));
+                // Формируем строку дат для передачи в кнопку
+                StringBuilder sbDates = new StringBuilder();
+                for (java.time.LocalDate d : targetDates) {
+                    sbDates.append(d.format(dtfFull)).append(",");
+                }
+                String datesString = sbDates.toString();
+                if (datesString.endsWith(",")) datesString = datesString.substring(0, datesString.length() - 1);
+
+                waitingScheduleEditDate.put(chatId, targetUser + ":" + datesString + (anchorId != null ? ":" + anchorId : ""));
 
                 InlineKeyboardMarkup markup = new InlineKeyboardMarkup(List.of(
                         List.of(createBtn("В (Выходной)", "ED_SCH_S:В"), createBtn("О (Отпуск)", "ED_SCH_S:О"), createBtn("Д (Дежурство)", "ED_SCH_S:Д")),
                         List.of(createBtn("Б (Больничный)", "ED_SCH_S:Б"), createBtn("А (За свой счет)", "ED_SCH_S:А"), createBtn("Г (Военкомат)", "ED_SCH_S:Г")),
                         List.of(createBtn("П (Другое подразделение)", "ED_SCH_S:П")),
                         List.of(createBtn("08:30 - 17:30", "ED_SCH_S:08:30-17:30"), createBtn("12:00 - 21:00", "ED_SCH_S:12:00-21:00")),
+                        List.of(createBtn("08:00 - 16:00 (Суббота)", "ED_SCH_S:08:00-16:00")),
                         List.of(createBtn("❌ Отменить", "CANCEL_PROMPT"))
                 ));
 
@@ -3017,7 +3067,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
             }
 
             if (waitingSickLeaveDate.containsKey(chatId)) {
-                waitingSickLeaveDate.remove(chatId);
+                Integer anchorId = waitingSickLeaveDate.remove(chatId);
                 String excelName = DatabaseManager.getUserExcelName(chatId);
                 if (excelName == null) {
                     sendMenu(chatId, role, "❌ Ошибка: вы не привязаны к графику.");
@@ -3026,41 +3076,68 @@ public class WarehouseBot extends TelegramLongPollingBot {
 
                 try {
                     String input = text.trim();
-                    java.time.format.DateTimeFormatter dtf = java.time.format.DateTimeFormatter.ofPattern("dd.MM.yyyy");
-                    java.time.LocalDate startDate;
-                    java.time.LocalDate endDate;
-                    String displayDate;
+                    java.time.format.DateTimeFormatter dtfFull = java.time.format.DateTimeFormatter.ofPattern("dd.MM.yyyy");
 
-                    if (input.contains("-")) {
-                        String[] parts = input.split("-");
-                        startDate = java.time.LocalDate.parse(parts[0].trim(), dtf);
-                        endDate = java.time.LocalDate.parse(parts[1].trim(), dtf);
-                        if (startDate.isAfter(endDate)) throw new Exception("Начальная дата больше конечной");
-                        displayDate = "с " + startDate.format(dtf) + " по " + endDate.format(dtf);
-                    } else {
-                        startDate = java.time.LocalDate.parse(input, dtf);
-                        endDate = startDate;
-                        displayDate = startDate.format(dtf);
+                    int currentYear = java.time.LocalDate.now().getYear();
+                    int currentMonth = java.time.LocalDate.now().getMonthValue();
+
+                    List<java.time.LocalDate> parsedDates = new ArrayList<>();
+
+                    // Используем умный парсинг для любых форматов
+                    String[] items = input.split(",");
+                    for (String item : items) {
+                        item = item.trim();
+                        if (item.isEmpty()) continue;
+
+                        if (item.contains("-")) {
+                            String[] parts = item.split("-");
+                            java.time.LocalDate start = parseSmartDate(parts[0].trim(), currentYear, currentMonth);
+                            java.time.LocalDate end = parseSmartDate(parts[1].trim(), currentYear, currentMonth);
+                            if (start.isAfter(end)) end = end.plusYears(1);
+
+                            java.time.LocalDate current = start;
+                            while (!current.isAfter(end)) {
+                                parsedDates.add(current);
+                                current = current.plusDays(1);
+                            }
+                        } else {
+                            parsedDates.add(parseSmartDate(item, currentYear, currentMonth));
+                        }
                     }
 
-                    long days = java.time.temporal.ChronoUnit.DAYS.between(startDate, endDate) + 1;
+                    if (parsedDates.isEmpty()) throw new Exception("Даты не найдены");
 
-                    if (days <= 7) {
-                        java.time.LocalDate current = startDate;
-                        while (!current.isAfter(endDate)) {
+                    // Больничный - это всегда непрерывный период. Находим начало и конец:
+                    java.time.LocalDate minDate = java.util.Collections.min(parsedDates);
+                    java.time.LocalDate maxDate = java.util.Collections.max(parsedDates);
+
+                    long days = java.time.temporal.ChronoUnit.DAYS.between(minDate, maxDate) + 1;
+                    String displayDate = (days == 1) ? minDate.format(dtfFull) : "с " + minDate.format(dtfFull) + " по " + maxDate.format(dtfFull);
+
+                    // --- ИЗМЕНЕНИЕ: ЛИМИТ 10 ДНЕЙ ---
+                    if (days <= 10) {
+                        java.time.LocalDate current = minDate;
+                        while (!current.isAfter(maxDate)) {
                             DatabaseManager.updateSingleShift(excelName, current.getYear(), current.getMonthValue(), current.getDayOfMonth(), "Б", "", "");
                             current = current.plusDays(1);
                         }
 
-                        sendScheduleMenu(chatId, role, "✅ Ваш больничный (" + displayDate + ") успешно зафиксирован! Выздоравливайте! 💊\n\n<i>Руководитель уведомлен, график обновлен.</i>", null);                        String adminMsg = "🚨 <b>ВНИМАНИЕ: Больничный!</b>\nСотрудник <b>" + excelName + "</b> сообщил о болезни.\nПериод: <b>" + displayDate + "</b>\n<i>Его график автоматически обновлен (статус \"Б\").</i>";
+                        // Рисуем SPA ответ для сотрудника
+                        sendScheduleMenu(chatId, role, "✅ Ваш больничный (" + displayDate + ") успешно зафиксирован! Выздоравливайте! 💊\n\n<i>Руководитель уведомлен, график обновлен.</i>", anchorId);
+
+                        String adminMsg = "🚨 <b>ВНИМАНИЕ: Больничный!</b>\nСотрудник <b>" + excelName + "</b> сообщил о болезни.\nПериод: <b>" + displayDate + "</b>\n<i>Его график автоматически обновлен (статус \"Б\").</i>";
+                        // 1. Уведомляем админа
                         for (Long adminId : DatabaseManager.getAdminIds()) sendDirectNotification(adminId, adminMsg);
+                        // 2. Уведомляем Козлова и Белевича (автоматически)
+                        notifyManagersAboutSickLeave(adminMsg);
 
                     } else {
-                        long requestId = DatabaseManager.createSickLeaveRequest(chatId, excelName, startDate.format(dtf), endDate.format(dtf));
-                        sendScheduleMenu(chatId, role, "⏳ Больничный (" + displayDate + ", " + days + " дн.) превышает 7 дней и требует подтверждения руководителя.\n\nВы получите уведомление, как только его согласуют.", null);
-                        String adminMsg = "🚨 <b>Запрос на больничный свыше недели</b>\nСотрудник: <b>" + excelName + "</b>\nПериод: <b>" + displayDate + "</b> (" + days + " дн.)\n\nПодтвердить изменение графика?";
-                        InlineKeyboardMarkup approvalMarkup = new InlineKeyboardMarkup();
-                        approvalMarkup.setKeyboard(List.of(List.of(
+                        // Больше 10 дней - требует подтверждения (уведомляем ТОЛЬКО АДМИНА)
+                        long requestId = DatabaseManager.createSickLeaveRequest(chatId, excelName, minDate.format(dtfFull), maxDate.format(dtfFull));
+                        sendScheduleMenu(chatId, role, "⏳ Больничный (" + displayDate + ", " + days + " дн.) превышает 10 дней и требует подтверждения руководителя.\n\nВы получите уведомление, как только его согласуют.", anchorId);
+
+                        String adminMsg = "🚨 <b>Запрос на больничный свыше 10 дней</b>\nСотрудник: <b>" + excelName + "</b>\nПериод: <b>" + displayDate + "</b> (" + days + " дн.)\n\nПодтвердить изменение графика?";
+                        InlineKeyboardMarkup approvalMarkup = new InlineKeyboardMarkup(List.of(List.of(
                                 createBtn("✅ Подтвердить", "SL_APPROVE:" + requestId),
                                 createBtn("❌ Отклонить", "SL_REJECT:" + requestId)
                         )));
@@ -3072,8 +3149,15 @@ public class WarehouseBot extends TelegramLongPollingBot {
                     }
 
                 } catch (Exception e) {
-                    sendCancelKeyboard(chatId, "❌ Неверный формат даты.\nПример правильного ввода: <code>15.10.2026</code> ИЛИ <code>15.10.2026-22.10.2026</code>");
-                    waitingSickLeaveDate.put(chatId, true);
+                    waitingSickLeaveDate.put(chatId, anchorId); // Возвращаем в режим ожидания
+                    if (anchorId != null) {
+                        EditMessageText edit = new EditMessageText();
+                        edit.setChatId(String.valueOf(chatId)); edit.setMessageId(anchorId);
+                        edit.setText("❌ <b>Не удалось распознать дату.</b>\n\nПожалуйста, используйте форматы:\n• Одиночно: <code>15.11</code>\n• Диапазоны: <code>15.10-22.10</code>\n\nВведите даты еще раз:");
+                        edit.setParseMode("HTML");
+                        edit.setReplyMarkup(new InlineKeyboardMarkup(List.of(List.of(createBtn("❌ Отменить", "CANCEL_PROMPT")))));
+                        try { execute(edit); } catch (Exception ignored) {}
+                    }
                 }
                 return;
             }
@@ -4056,6 +4140,50 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 execute(edit);
             }
         } catch (TelegramApiException e) {}
+    }
+
+    // Метод для уведомления ответственных за график (Козлов и Белевич)
+    private void notifyManagersAboutSickLeave(String text) {
+        List<String> allNames = DatabaseManager.getAllExcelNames();
+        List<Long> admins = DatabaseManager.getAdminIds();
+
+        for (String name : allNames) {
+            // Ищем нужных людей по части фамилии
+            if (name.contains("Козлов") || name.contains("Белевич")) {
+                Long managerId = DatabaseManager.getUserIdByExcelName(name);
+                // Отправляем им уведомление (если нашли ID и если они сами не являются админами, чтобы не дублировать)
+                if (managerId != null && !admins.contains(managerId)) {
+                    sendDirectNotification(managerId, text);
+                }
+            }
+        }
+    }
+
+    // Умный парсер дат: понимает форматы "10.11", "10.11.26" и "10.11.2026"
+    private java.time.LocalDate parseSmartDate(String input, int currentYear, int currentMonth) throws Exception {
+        String cleanInput = input.trim();
+        String[] parts = cleanInput.split("\\.");
+
+        if (parts.length < 2) throw new Exception("Неверный формат даты");
+
+        int day = Integer.parseInt(parts[0]);
+        int month = Integer.parseInt(parts[1]);
+        int year = currentYear;
+
+        if (parts.length == 3) {
+            year = Integer.parseInt(parts[2]);
+            // Если ввели двузначный год (например, 26), превращаем в 2026
+            if (year < 100) {
+                year += 2000;
+            }
+        } else {
+            // Если год не указан (ввели только "10.11"), проверяем переход через Новый год
+            if (currentMonth == 12 && month == 1) {
+                year++;
+            }
+        }
+
+        return java.time.LocalDate.of(year, month, day);
     }
 
     public Map<Long, Integer> getForceWelderReturnIds() { return forceWelderReturnIds; }

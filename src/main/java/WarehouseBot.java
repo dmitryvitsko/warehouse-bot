@@ -1312,6 +1312,29 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 return;
             }
 
+            // Возврат в главное меню ТМ (Выбор: В работе / Закрытые)
+            if (data.equals("TM_MAIN_MENU")) {
+                if (!canAccessTm(chatId, role)) return;
+                JSONArray tasks = fetchTmTasks(chatId);
+                int inProgress = TmClient.countByStatus(tasks, false);
+                int closedCount = TmClient.countByStatus(tasks, true);
+
+                InlineKeyboardMarkup markup = new InlineKeyboardMarkup(List.of(
+                        List.of(createBtn("📋 В работе (" + inProgress + ")", "TM_INPROGRESS")),
+                        List.of(createBtn("✅ Закрытые (" + closedCount + ")", "TM_CLOSED")),
+                        List.of(createBtn("❌ Закрыть панель", "GENERIC_CLOSE"))
+                ));
+
+                EditMessageText edit = new EditMessageText();
+                edit.setChatId(String.valueOf(chatId));
+                edit.setMessageId(messageId);
+                edit.setText("🛠 <b>Мои заявки ТМ</b>\nВыберите раздел:");
+                edit.setParseMode("HTML");
+                edit.setReplyMarkup(markup);
+                try { execute(edit); } catch (Exception e) {}
+                return;
+            }
+
             // Обработка выбора дня, если сегодня Пятница
             if (data.startsWith("SCHED_DAY_")) {
                 int offset = Integer.parseInt(data.split("_")[2]);
@@ -1849,7 +1872,22 @@ public class WarehouseBot extends TelegramLongPollingBot {
             if ("TM_CLOSED".equals(data)) {
                 if (!canAccessTm(chatId, role)) return;
                 JSONArray tasks = fetchTmTasks(chatId);
-                sendClosableMessage(chatId, TmClient.formatTasksText(tasks, true));
+
+                // Используем EditMessageText для текущего окна
+                EditMessageText edit = new EditMessageText();
+                edit.setChatId(String.valueOf(chatId));
+                edit.setMessageId(messageId);
+                edit.setText(TmClient.formatTasksText(tasks, true));
+                edit.setParseMode("HTML");
+
+                // Кнопка возврата к выбору заявок
+                InlineKeyboardMarkup markup = new InlineKeyboardMarkup(List.of(
+                        List.of(createBtn("🔙 Назад к меню ТМ", "TM_MAIN_MENU"))
+                ));
+                edit.setReplyMarkup(markup);
+
+                try { execute(edit); } catch (TelegramApiException e) {}
+
                 AnswerCallbackQuery answer = new AnswerCallbackQuery();
                 answer.setCallbackQueryId(update.getCallbackQuery().getId());
                 try { execute(answer); } catch (TelegramApiException e) {}
@@ -1949,7 +1987,12 @@ public class WarehouseBot extends TelegramLongPollingBot {
                     String repTxt = "Выполнил служебное поручение";
                     String tmSess = DatabaseManager.getTmSession(chatId);
                     boolean ok = tmSess != null && TmClient.performTask(tmSess, session.taskId, repTxt);
-                    if (ok) updateReportUI(chatId, session, "✅ Отчёт #" + session.taskId + " отправлен:\n<i>" + repTxt + "</i>", new InlineKeyboardMarkup(List.of(List.of(createBtn("❌ Закрыть", "CANCEL_PROMPT")))));
+                    if (ok) {
+                        updateReportUI(chatId, session, "✅ Отчёт #" + session.taskId + " отправлен:\n<i>" + repTxt + "</i>", new InlineKeyboardMarkup(List.of(
+                                // ИСПОЛЬЗУЕМ TM_REP_CANCEL ДЛЯ ИДЕАЛЬНОГО ВОЗВРАТА К СПИСКУ
+                                List.of(createBtn("📋 Вернуться к заявкам", "TM_REP_CANCEL"))
+                        )));
+                    }
                 }
                 return;
             }
@@ -2052,7 +2095,8 @@ public class WarehouseBot extends TelegramLongPollingBot {
                         : "⚠️ Материалы списаны, но <b>не удалось отправить отчет в ТМ</b> (проверьте подключение или статус заявки).";
 
                 updateReportUI(chatId, session, statusMsg, new InlineKeyboardMarkup(List.of(
-                        List.of(createBtn("📋 Вернуться к заявкам", "TM_INPROGRESS"))
+                        // ИСПОЛЬЗУЕМ TM_REP_CANCEL ДЛЯ ИДЕАЛЬНОГО ВОЗВРАТА К СПИСКУ
+                        List.of(createBtn("📋 Вернуться к заявкам", "TM_REP_CANCEL"))
                 )));
                 return;
             }

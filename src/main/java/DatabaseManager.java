@@ -45,6 +45,9 @@ public class DatabaseManager {
                         );
                     """);
 
+            stmt.execute("CREATE INDEX IF NOT EXISTS idx_sched_v2_name ON schedules_v2(excel_name);");
+            stmt.execute("CREATE INDEX IF NOT EXISTS idx_tools_assigned ON tools(assigned_to);");
+
             stmt.execute("""
     CREATE TABLE IF NOT EXISTS tm_accounts (
         chat_id INTEGER PRIMARY KEY,
@@ -318,9 +321,46 @@ public class DatabaseManager {
         }
     }
 
-    // =========================================================================
-    // СУПЕР-МОДУЛЬ: КОНТРОЛЬ СВАРОЧНЫХ АППАРАТОВ
-    // =========================================================================
+    public static boolean transferWelder(int welderId, long fromUserId, long toUserId) {
+        String sqlUpdate = "UPDATE welders SET assigned_to = ?, assigned_time = datetime('now', 'localtime') WHERE id = ?";
+        String sqlHistRet = "INSERT INTO welders_history (welder_id, user_id, action) VALUES (?, ?, 'RETURNED')";
+        String sqlHistTake = "INSERT INTO welders_history (welder_id, user_id, action) VALUES (?, ?, 'TAKEN')";
+
+        try (Connection conn = getConnection()) {
+            conn.setAutoCommit(false);
+            try (PreparedStatement psUpd = conn.prepareStatement(sqlUpdate);
+                 PreparedStatement psRet = conn.prepareStatement(sqlHistRet);
+                 PreparedStatement psTake = conn.prepareStatement(sqlHistTake)) {
+
+                psUpd.setLong(1, toUserId);
+                psUpd.setInt(2, welderId);
+                int affected = psUpd.executeUpdate();
+
+                if (affected > 0) {
+                    psRet.setInt(1, welderId);
+                    psRet.setLong(2, fromUserId);
+                    psRet.executeUpdate();
+
+                    psTake.setInt(1, welderId);
+                    psTake.setLong(2, toUserId);
+                    psTake.executeUpdate();
+
+                    conn.commit();
+                    return true;
+                } else {
+                    conn.rollback();
+                }
+            } catch (SQLException ex) {
+                conn.rollback();
+                ex.printStackTrace();
+            } finally {
+                conn.setAutoCommit(true);
+            }
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
+        return false;
+    }
 
     public static boolean takeWelder(int welderId, long userId, Long adminId) {
         String sqlUpdate = "UPDATE welders SET status = 'IN_USE', assigned_to = ?, assigned_time = datetime('now', 'localtime') WHERE id = ? AND status = 'ON_BASE'";
@@ -490,16 +530,81 @@ public class DatabaseManager {
         return "Неизвестный аппарат";
     }
 
-    // =========================================================================
-    // ОСТАЛЬНОЙ СТАРЫЙ КОД (БЕЗ ИЗМЕНЕНИЙ)
-    // =========================================================================
-
     public static String saveImportedMaterials(List<ExcelImporter.MaterialRow> rows) {
         try (Connection conn = getConnection()) {
+
+            // --- ШАГ 1: Собираем текущие остатки на руках у мастеров ---
+            Map<String, Double> onHandsMap = new HashMap<>();
+            Map<String, String> whoHoldsMap = new HashMap<>();
+
+            String checkSql = """
+                SELECT m.code, m.name, u.full_name, b.quantity
+                FROM employee_balances b
+                JOIN materials m ON b.material_id = m.id
+                JOIN users u ON b.user_id = u.id
+                WHERE b.quantity > 0.00001
+            """;
+
+            try (Statement stmt = conn.createStatement(); ResultSet rs = stmt.executeQuery(checkSql)) {
+                while (rs.next()) {
+                    String code = rs.getString("code");
+                    String worker = rs.getString("full_name");
+                    double qty = rs.getDouble("quantity");
+
+                    onHandsMap.put(code, onHandsMap.getOrDefault(code, 0.0) + qty);
+
+                    String holderInfo = worker + " (" + fmtQty(qty) + ")";
+                    whoHoldsMap.put(code, whoHoldsMap.containsKey(code) ? whoHoldsMap.get(code) + ", " + holderInfo : holderInfo);
+                }
+            }
+
+            // --- ШАГ 2: Сверка с новой Excel-ведомостью ---
+            StringBuilder errorReport = new StringBuilder();
+            boolean hasErrors = false;
+            int errorCount = 0;
+
+            // Суммируем всё, что пришло из Excel по кодам
+            Map<String, Double> excelQtyMap = new HashMap<>();
+            for (ExcelImporter.MaterialRow r : rows) {
+                excelQtyMap.put(r.code, excelQtyMap.getOrDefault(r.code, 0.0) + r.qty);
+            }
+
+            // Проверяем: не превышают ли остатки на руках общие объемы из бухгалтерии?
+            for (Map.Entry<String, Double> entry : onHandsMap.entrySet()) {
+                String code = entry.getKey();
+                double handsQty = entry.getValue();
+                double excelQty = excelQtyMap.getOrDefault(code, 0.0);
+
+                if (handsQty > excelQty + 1e-9) {
+                    hasErrors = true;
+                    if (errorCount < 20) { // Ограничиваем вывод, чтобы сообщение не было слишком огромным
+                        errorReport.append("🚨 Инв. № <code>").append(code).append("</code>\n")
+                                .append("По новой ведомости: <b>").append(fmtQty(excelQty)).append("</b>\n")
+                                .append("У мастеров на руках: <b>").append(fmtQty(handsQty)).append("</b>\n")
+                                .append("Кто держит: <i>").append(whoHoldsMap.get(code)).append("</i>\n\n");
+                    }
+                    errorCount++;
+                }
+            }
+
+            // Если есть расхождения — отменяем импорт и бьем тревогу!
+            if (hasErrors) {
+                String header = "❌ <b>ОШИБКА ИМПОРТА: НЕДОСТАЧА ПО БУХГАЛТЕРИИ!</b>\n\n" +
+                        "Материалы ниже числятся у мастеров, но в новой ведомости их меньше (или вообще нет). " +
+                        "Заставьте мастеров списать эти материалы перед загрузкой ведомости:\n\n";
+                if (errorCount > 20) {
+                    errorReport.append("\n<i>... и еще ").append(errorCount - 20).append(" проблемных позиций.</i>");
+                }
+                return header + errorReport.toString().trim();
+            }
+
+            // --- ШАГ 3: Если всё сходится, обновляем базу ---
             conn.setAutoCommit(false);
+
             try (Statement stmt = conn.createStatement()) {
                 stmt.execute("UPDATE materials SET warehouse_qty = 0, start_qty = 0, in_qty = 0, out_qty = 0, start_sum = 0, end_sum = 0;");
             }
+
             String sql = """
                         INSERT INTO materials (
                             account_number, code, name, original_unit, work_unit, 
@@ -524,6 +629,10 @@ public class DatabaseManager {
 
             try (PreparedStatement ps = conn.prepareStatement(sql)) {
                 for (ExcelImporter.MaterialRow r : rows) {
+                    double handsQty = onHandsMap.getOrDefault(r.code, 0.0);
+                    // Вычисляем чистый остаток для свободного склада
+                    double actualWarehouseQty = Math.max(0, r.qty - handsQty);
+
                     ps.setString(1, r.account);
                     ps.setString(2, r.code);
                     ps.setString(3, r.name);
@@ -531,7 +640,7 @@ public class DatabaseManager {
                     ps.setString(5, r.workUnit);
                     ps.setDouble(6, r.convFactor);
                     ps.setDouble(7, r.priceWithVat);
-                    ps.setDouble(8, r.qty);
+                    ps.setDouble(8, actualWarehouseQty); // Кладем на склад только то, что свободно
                     ps.setString(9, r.batchInfo != null ? r.batchInfo : "");
                     ps.setDouble(10, r.startQty);
                     ps.setDouble(11, r.startSum);
@@ -542,7 +651,8 @@ public class DatabaseManager {
                 }
             }
             conn.commit();
-            return "✅ <b>Оборотная ведомость успешно загружена!</b>\nУмный конвертер единиц (км ➔ м, тыс.шт ➔ шт, гильзы уп ➔ шт) сработал корректно.";
+            return "✅ <b>Оборотная ведомость успешно загружена! (Умный импорт)</b>\nКоличество материалов на руках у сотрудников было проверено и автоматически вычтено из свободных остатков на складе.";
+
         } catch (SQLException e) {
             e.printStackTrace();
             return "❌ Ошибка базы данных при сохранении ведомости: " + e.getMessage();
@@ -1442,10 +1552,11 @@ public class DatabaseManager {
                                 String pEnd = rsAll.getString("end_time");
 
                                 boolean partnerIsSecondShift = false;
-                                if (pEnd != null && (pEnd.contains("21:00") || pEnd.contains("21.00")))
+                                if (pEnd != null && !pEnd.isEmpty() && (pEnd.contains("21:00") || pEnd.contains("21.00"))) {
                                     partnerIsSecondShift = true;
-                                else if (pStart != null && (pStart.startsWith("11:") || pStart.startsWith("12:") || pStart.startsWith("13:") || pStart.startsWith("14:")))
+                                } else if (pStart != null && !pStart.isEmpty() && (pStart.startsWith("11:") || pStart.startsWith("12:") || pStart.startsWith("13:") || pStart.startsWith("14:"))) {
                                     partnerIsSecondShift = true;
+                                }
 
                                 if (isSaturday || (isSecondShift && partnerIsSecondShift))
                                     allWorkersThisShift.add(pName);
@@ -1487,7 +1598,8 @@ public class DatabaseManager {
                         // Если сам пользователь — старший смены
                         if (iAmSenior) headerPrefix += "  👑 <i>(Вы — старший смены!)</i>";
 
-                        sb.append(headerPrefix).append("\n\n");
+                        // ИЗМЕНЕНИЕ 1: Оставляем только один перенос строки (убираем пустоту)
+                        sb.append(headerPrefix).append("\n");
 
                         if (formattedPartners.isEmpty()) {
                             sb.append(" ▪ <i>(Никого не найдено)</i>\n");
@@ -1497,17 +1609,23 @@ public class DatabaseManager {
                                 String p1 = formattedPartners.get(i);
                                 if (i + 1 < formattedPartners.size()) {
                                     String p2 = formattedPartners.get(i + 1);
-                                    // 4 пробела для визуального разделения колонок
                                     sb.append("▪ ").append(p1).append("    ▪ ").append(p2).append("\n");
                                 } else {
                                     sb.append("▪ ").append(p1).append("\n");
                                 }
                             }
                         }
-                        sb.append("\n");
+                        // ИЗМЕНЕНИЕ 2: Добавляем пунктирный разделитель вместо пустого абзаца
+                        sb.append("┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈\n");
                     }
                 }
             }
+
+            // Если дни найдены, убираем самый последний лишний пунктир в конце сообщения
+            if (foundAny && sb.toString().endsWith("┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈\n")) {
+                sb.setLength(sb.length() - 21);
+            }
+
             if (!foundAny) return "ℹ️ В этом месяце у вас нет рабочих суббот или вторых смен.";
         } catch (SQLException e) {
             e.printStackTrace();
@@ -1565,6 +1683,7 @@ public class DatabaseManager {
     }
 
     public static class ReceiptSession {
+        public Integer anchorMsgId; // <--- ДОБАВИТЬ ЭТУ СТРОКУ
         public List<ReceiptItem> items = new ArrayList<>();
         public int waitingServiceId = -1;
         public int waitingMaterialId = -1;
@@ -1824,22 +1943,53 @@ public class DatabaseManager {
     public static String saveImportedTools(List<ParsedTool> tools) {
         try (Connection conn = getConnection()) {
             conn.setAutoCommit(false);
-            String sql = "INSERT INTO tools (name, inv_number, status) VALUES (?, ?, 'IN_STOCK')";
+
+            // SQL для проверки, существует ли такой инвентарник
+            String checkSql = "SELECT id FROM tools WHERE inv_number = ?";
+            // SQL для добавления нового
+            String insertSql = "INSERT INTO tools (name, inv_number, status) VALUES (?, ?, 'IN_STOCK')";
+            // SQL для обновления названия (если бухгалтер его поменял)
+            String updateSql = "UPDATE tools SET name = ? WHERE inv_number = ?";
+
             int addedCount = 0;
-            try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            int updatedCount = 0;
+
+            try (PreparedStatement checkPs = conn.prepareStatement(checkSql);
+                 PreparedStatement insertPs = conn.prepareStatement(insertSql);
+                 PreparedStatement updatePs = conn.prepareStatement(updateSql)) {
+
                 for (ParsedTool t : tools) {
                     int qty = t.quantity > 0 ? t.quantity : 1;
+
                     for (int i = 1; i <= qty; i++) {
-                        ps.setString(1, t.name);
-                        String inv = (t.invNumber == null || t.invNumber.trim().isEmpty()) ? "Б/Н - " + i : (qty > 1 ? t.invNumber + " (" + i + ")" : t.invNumber);
-                        ps.setString(2, inv);
-                        ps.executeUpdate();
-                        addedCount++;
+                        String inv = (t.invNumber == null || t.invNumber.trim().isEmpty())
+                                ? "Б/Н (" + t.name + ") - " + i
+                                : (qty > 1 ? t.invNumber + " (" + i + ")" : t.invNumber);
+
+                        // 1. Проверяем, есть ли уже такой инструмент в базе
+                        checkPs.setString(1, inv);
+                        try (ResultSet rs = checkPs.executeQuery()) {
+                            if (rs.next()) {
+                                // 2. Инструмент УЖЕ ЕСТЬ.
+                                // Статус (выдан/не выдан) НЕ ТРОГАЕМ. Обновляем только имя на всякий случай.
+                                updatePs.setString(1, t.name);
+                                updatePs.setString(2, inv);
+                                updatePs.executeUpdate();
+                                updatedCount++;
+                            } else {
+                                // 3. Этого инструмента нет в базе. Добавляем на склад!
+                                insertPs.setString(1, t.name);
+                                insertPs.setString(2, inv);
+                                insertPs.executeUpdate();
+                                addedCount++;
+                            }
+                        }
                     }
                 }
             }
             conn.commit();
-            return "✅ <b>База инструмента успешно загружена!</b>\nДобавлено единиц на склад: <b>" + addedCount + "</b> шт.";
+            return "✅ <b>База инструмента успешно синхронизирована!</b>\nДобавлено новых: <b>" + addedCount + "</b> шт.\nОбновлено существующих: <b>" + updatedCount + "</b> шт.";
+
         } catch (SQLException e) {
             e.printStackTrace();
             return "❌ Ошибка базы данных при сохранении инструмента: " + e.getMessage();
@@ -2508,22 +2658,45 @@ public class DatabaseManager {
         return null;
     }
 
-    // Метод: Утренняя сводка (Кто сегодня работает?)
+    // --- ВСПОМОГАТЕЛЬНЫЙ МЕТОД ---
+    // Форматирует список смены. Если showCrown = true, ищет и выделяет старшего 👑
+    private static List<String> formatShiftList(List<String[]> workers, boolean showCrown) {
+        List<String> result = new ArrayList<>();
+        if (workers.isEmpty()) return result;
+
+        int minRank = 99;
+        if (showCrown) {
+            for (String[] w : workers) {
+                int r = getSeniorityRank(w[0]);
+                if (r < minRank) minRank = r;
+            }
+        }
+
+        for (String[] w : workers) {
+            String name = w[0];
+            String timeStr = w[1];
+            String crown = (showCrown && getSeniorityRank(name) == minRank && minRank != 99) ? " 👑" : "";
+            result.add("▪️ " + name + crown + timeStr);
+        }
+        return result;
+    }
+
     // Метод: Утренняя сводка (Кто сегодня работает?)
     public static String getTodayRoster() {
         java.time.LocalDate today = java.time.LocalDate.now();
         int year = today.getYear();
         int month = today.getMonthValue();
         int day = today.getDayOfMonth();
+        java.time.DayOfWeek dow = today.getDayOfWeek();
         String dayOfWeekRu = getDayOfWeekRu(year, month, day);
 
         StringBuilder sb = new StringBuilder();
         sb.append(String.format("📅 <b>Сводка на сегодня (%02d.%02d.%d, %s):</b>\n\n", day, month, year, dayOfWeekRu));
 
-        List<String> firstShift = new ArrayList<>();
-        List<String> secondShift = new ArrayList<>();
+        List<String[]> firstShift = new ArrayList<>();
+        List<String[]> secondShift = new ArrayList<>();
         List<String> duty = new ArrayList<>();
-        List<String> otherDept = new ArrayList<>(); // <-- Наша новая группа
+        List<String> otherDept = new ArrayList<>();
         List<String> absent = new ArrayList<>();
 
         try (Connection conn = getConnection();
@@ -2543,62 +2716,144 @@ public class DatabaseManager {
                 String end = rs.getString("end_time");
                 String status = rs.getString("status_code");
 
-                if ("В".equals(status)) {
-                    absent.add("▪️ " + name + " — 🏖 Выходной");
-                } else if ("О".equals(status)) {
-                    absent.add("▪️ " + name + " — 🌴 Отпуск");
-                } else if ("Б".equals(status)) {
-                    absent.add("▪️ " + name + " — 💊 Больничный");
-                } else if ("А".equals(status)) {
-                    absent.add("▪️ " + name + " — 📄 За свой счет");
-                } else if ("Г".equals(status)) {
-                    absent.add("▪️ " + name + " — 🪖 Военкомат");
-                } else if ("П".equals(status)) {
-                    // Теперь статус "П" попадает в свой собственный список (подпись убрана, т.к. будет общий заголовок)
-                    otherDept.add("▪️ " + name);
-                } else if ("Д".equals(status)) {
-                    duty.add("▪️ " + name + " — ❗️ Дежурство");
-                } else {
-                    // Определяем смену по времени
+                if ("В".equals(status)) absent.add("▪️ " + name + " — 🏖 Выходной");
+                else if ("О".equals(status)) absent.add("▪️ " + name + " — 🌴 Отпуск");
+                else if ("Б".equals(status)) absent.add("▪️ " + name + " — 💊 Больничный");
+                else if ("А".equals(status)) absent.add("▪️ " + name + " — 📄 За свой счет");
+                else if ("Г".equals(status)) absent.add("▪️ " + name + " — 🪖 Военкомат");
+                else if ("П".equals(status)) otherDept.add("▪️ " + name);
+                else if ("Д".equals(status)) duty.add("▪️ " + name + " — ❗️ Дежурство");
+                else {
                     boolean isSecond = false;
                     if (end != null && (end.contains("21:00") || end.contains("21.00"))) isSecond = true;
-                    else if (start != null && (start.startsWith("11:") || start.startsWith("12:") || start.startsWith("13:") || start.startsWith("14:")))
-                        isSecond = true;
+                    else if (start != null && (start.startsWith("11:") || start.startsWith("12:") || start.startsWith("13:") || start.startsWith("14:"))) isSecond = true;
 
                     String timeStr = (start != null && end != null && !start.isEmpty() && !end.isEmpty()) ? " (" + start + " - " + end + ")" : "";
 
-                    if (isSecond) {
-                        secondShift.add("▪️ " + name + timeStr);
-                    } else {
-                        firstShift.add("▪️ " + name + timeStr);
-                    }
+                    if (isSecond) secondShift.add(new String[]{name, timeStr});
+                    else firstShift.add(new String[]{name, timeStr});
                 }
             }
 
             if (!hasAnyData) return "ℹ️ На сегодняшний день график еще не загружен.";
 
-            if (!firstShift.isEmpty()) {
-                sb.append("☀️ <b>Первая смена:</b>\n").append(String.join("\n", firstShift)).append("\n\n");
-            }
-            if (!secondShift.isEmpty()) {
-                sb.append("🌙 <b>Вторая смена:</b>\n").append(String.join("\n", secondShift)).append("\n\n");
-            }
-            if (!duty.isEmpty()) {
-                sb.append("🚨 <b>Дежурство:</b>\n").append(String.join("\n", duty)).append("\n\n");
-            }
-            // Выводим наш новый блок перед отсутствующими
-            if (!otherDept.isEmpty()) {
-                sb.append("🏢 <b>В другом подразделении:</b>\n").append(String.join("\n", otherDept)).append("\n\n");
-            }
-            if (!absent.isEmpty()) {
-                sb.append("❌ <b>Отсутствуют:</b>\n").append(String.join("\n", absent));
+            if (dow == java.time.DayOfWeek.SUNDAY) {
+                if (duty.isEmpty()) sb.append("🚨 <b>Дежурство:</b>\n▪️ Дежурных нет.\n\n");
+                else sb.append("🚨 <b>Дежурство:</b>\n").append(String.join("\n", duty)).append("\n\n");
+            } else if (dow == java.time.DayOfWeek.SATURDAY) {
+                List<String[]> saturdayShift = new ArrayList<>(firstShift);
+                saturdayShift.addAll(secondShift);
+
+                // Суббота — ставим true, чтобы показать корону 👑
+                List<String> formattedSat = formatShiftList(saturdayShift, true);
+                if (!formattedSat.isEmpty()) sb.append("☀️ <b>Рабочая смена:</b>\n").append(String.join("\n", formattedSat)).append("\n\n");
+
+                if (duty.isEmpty()) sb.append("🚨 <b>Дежурство:</b>\n▪️ Дежурных нет.\n\n");
+                else sb.append("🚨 <b>Дежурство:</b>\n").append(String.join("\n", duty)).append("\n\n");
+            } else {
+                // Будние дни — ставим false, короны не нужны
+                List<String> f1 = formatShiftList(firstShift, false);
+                List<String> f2 = formatShiftList(secondShift, false);
+
+                if (!f1.isEmpty()) sb.append("☀️ <b>Первая смена:</b>\n").append(String.join("\n", f1)).append("\n\n");
+                if (!f2.isEmpty()) sb.append("🌙 <b>Вторая смена:</b>\n").append(String.join("\n", f2)).append("\n\n");
+                if (!duty.isEmpty()) sb.append("🚨 <b>Дежурство:</b>\n").append(String.join("\n", duty)).append("\n\n");
+                if (!otherDept.isEmpty()) sb.append("🏢 <b>В другом подразделении:</b>\n").append(String.join("\n", otherDept)).append("\n\n");
+                if (!absent.isEmpty()) sb.append("❌ <b>Отсутствуют:</b>\n").append(String.join("\n", absent));
             }
 
         } catch (SQLException e) {
             e.printStackTrace();
             return "❌ Ошибка при получении сводки.";
         }
+        return sb.toString().trim();
+    }
 
+    // Метод: Сводка на любой будущий день (Для кнопки "Кто работает завтра?")
+    public static String getTargetDayRoster(int daysOffset, String dayLabel) {
+        java.time.LocalDate targetDate = java.time.LocalDate.now().plusDays(daysOffset);
+        int year = targetDate.getYear();
+        int month = targetDate.getMonthValue();
+        int day = targetDate.getDayOfMonth();
+        java.time.DayOfWeek dow = targetDate.getDayOfWeek();
+        String dayOfWeekRu = getDayOfWeekRu(year, month, day);
+
+        StringBuilder sb = new StringBuilder();
+        sb.append(String.format("📅 <b>Сводка на %s (%02d.%02d.%d, %s):</b>\n\n", dayLabel.toLowerCase(), day, month, year, dayOfWeekRu));
+
+        List<String[]> firstShift = new ArrayList<>();
+        List<String[]> secondShift = new ArrayList<>();
+        List<String> duty = new ArrayList<>();
+        List<String> otherDept = new ArrayList<>();
+        List<String> absent = new ArrayList<>();
+
+        try (Connection conn = getConnection();
+             PreparedStatement ps = conn.prepareStatement(
+                     "SELECT excel_name, start_time, end_time, status_code FROM schedules_v2 WHERE year = ? AND month = ? AND day = ? ORDER BY excel_name")) {
+
+            ps.setInt(1, year);
+            ps.setInt(2, month);
+            ps.setInt(3, day);
+            ResultSet rs = ps.executeQuery();
+
+            boolean hasAnyData = false;
+            while (rs.next()) {
+                hasAnyData = true;
+                String name = rs.getString("excel_name");
+                String start = rs.getString("start_time");
+                String end = rs.getString("end_time");
+                String status = rs.getString("status_code");
+
+                if ("В".equals(status)) absent.add("▪️ " + name + " — 🏖 Выходной");
+                else if ("О".equals(status)) absent.add("▪️ " + name + " — 🌴 Отпуск");
+                else if ("Б".equals(status)) absent.add("▪️ " + name + " — 💊 Больничный");
+                else if ("А".equals(status)) absent.add("▪️ " + name + " — 📄 За свой счет");
+                else if ("Г".equals(status)) absent.add("▪️ " + name + " — 🪖 Военкомат");
+                else if ("П".equals(status)) otherDept.add("▪️ " + name);
+                else if ("Д".equals(status)) duty.add("▪️ " + name + " — ❗️ Дежурство");
+                else {
+                    boolean isSecond = false;
+                    if (end != null && (end.contains("21:00") || end.contains("21.00"))) isSecond = true;
+                    else if (start != null && (start.startsWith("11:") || start.startsWith("12:") || start.startsWith("13:") || start.startsWith("14:"))) isSecond = true;
+
+                    String timeStr = (start != null && end != null && !start.isEmpty() && !end.isEmpty()) ? " (" + start + " - " + end + ")" : "";
+
+                    if (isSecond) secondShift.add(new String[]{name, timeStr});
+                    else firstShift.add(new String[]{name, timeStr});
+                }
+            }
+
+            if (!hasAnyData) return "ℹ️ На этот день график еще не загружен.";
+
+            if (dow == java.time.DayOfWeek.SUNDAY) {
+                if (duty.isEmpty()) sb.append("🚨 <b>Дежурство:</b>\n▪️ Дежурных нет.\n\n");
+                else sb.append("🚨 <b>Дежурство:</b>\n").append(String.join("\n", duty)).append("\n\n");
+            } else if (dow == java.time.DayOfWeek.SATURDAY) {
+                List<String[]> saturdayShift = new ArrayList<>(firstShift);
+                saturdayShift.addAll(secondShift);
+
+                // Суббота — ставим true, чтобы показать корону 👑
+                List<String> formattedSat = formatShiftList(saturdayShift, true);
+                if (!formattedSat.isEmpty()) sb.append("☀️ <b>Рабочая смена:</b>\n").append(String.join("\n", formattedSat)).append("\n\n");
+
+                if (duty.isEmpty()) sb.append("🚨 <b>Дежурство:</b>\n▪️ Дежурных нет.\n\n");
+                else sb.append("🚨 <b>Дежурство:</b>\n").append(String.join("\n", duty)).append("\n\n");
+            } else {
+                // Будние дни — ставим false, короны не нужны
+                List<String> f1 = formatShiftList(firstShift, false);
+                List<String> f2 = formatShiftList(secondShift, false);
+
+                if (!f1.isEmpty()) sb.append("☀️ <b>Первая смена:</b>\n").append(String.join("\n", f1)).append("\n\n");
+                if (!f2.isEmpty()) sb.append("🌙 <b>Вторая смена:</b>\n").append(String.join("\n", f2)).append("\n\n");
+                if (!duty.isEmpty()) sb.append("🚨 <b>Дежурство:</b>\n").append(String.join("\n", duty)).append("\n\n");
+                if (!otherDept.isEmpty()) sb.append("🏢 <b>В другом подразделении:</b>\n").append(String.join("\n", otherDept)).append("\n\n");
+                if (!absent.isEmpty()) sb.append("❌ <b>Отсутствуют:</b>\n").append(String.join("\n", absent));
+            }
+
+        } catch (SQLException e) {
+            e.printStackTrace();
+            return "❌ Ошибка при получении сводки.";
+        }
         return sb.toString().trim();
     }
 
@@ -2854,4 +3109,5 @@ public class DatabaseManager {
 
         return found ? sb.toString().trim() : null;
     }
+
 }

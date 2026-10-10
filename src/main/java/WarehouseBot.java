@@ -34,14 +34,13 @@ public class WarehouseBot extends TelegramLongPollingBot {
 
     private final Map<Long, DatabaseManager.ReceiptSession> receiptSessions = new HashMap<>();
     private final Map<Long, Integer> waitingTakeMaterialId = new HashMap<>();
-    private final Map<Long, WriteOffSession> writeOffSessions = new HashMap<>();
     private final Map<Long, String> fileWaitState = new HashMap<>();
     private final Map<Long, Integer> waitingToolWriteOffReason = new HashMap<>();
     private final Map<Long, Integer> waitingOrshPhoto = new HashMap<>();
     private final Map<Long, Integer> waitingOrshProblemReason = new HashMap<>();
     private final Map<Long, Integer> waitingDirContactCat = new HashMap<>();
     private final Map<Long, Boolean> waitingNewEmployeeName = new ConcurrentHashMap<>();
-    private final Map<Long, Boolean> waitingSickLeaveDate = new ConcurrentHashMap<>();
+    private final Map<Long, Integer> waitingSickLeaveDate = new ConcurrentHashMap<>();
     private final Map<Long, String> tmAuthStep = new HashMap<>();
     private final Map<Long, String> waitingTmReportTaskId = new HashMap<>();
     private final Map<Long, String> tmTempLogin = new HashMap<>();
@@ -70,6 +69,26 @@ public class WarehouseBot extends TelegramLongPollingBot {
         public boolean isEditing = false; // 👈 ДОБАВЛЕНО: флаг точечного редактирования
     }
 
+    private final Map<Long, WriteOffCartSession> writeOffCartSessions = new ConcurrentHashMap<>();
+
+    public static class WriteOffCartSession {
+        public Integer anchorMsgId;
+        public String step = "";
+
+        // Список уже добавленных в корзину материалов
+        public List<WriteOffSession> items = new ArrayList<>();
+        // Временное хранение материала, пока вводится количество
+        public WriteOffSession tempItem = null;
+
+        public boolean isPaidReceipt = false;
+        public String receiptNumber = "";
+        public String phoneNumber = "";
+        public String contractNumber = "";
+        public String address = "";
+        public String closingCode = "";
+        public String reason = "";
+    }
+
     private final Map<Long, List<Integer>> tmActiveTaskMessages = new ConcurrentHashMap<>();
 
     private final Map<Long, String> waitingScheduleEditUser = new HashMap<>();
@@ -77,6 +96,17 @@ public class WarehouseBot extends TelegramLongPollingBot {
     private final Map<Long, Integer> forceWelderReturnIds = new HashMap<>();
     // Память: кто уже нажал "Оставить на завтра" (чтобы не спамить)
     private final Map<Long, LocalDate> keptWelderForTomorrow = new ConcurrentHashMap<>();
+
+    public static class PendingWelderTransfer {
+        public int welderId;
+        public long senderId;
+        public long receiverId;
+        public Integer senderMsgId;
+        public Integer receiverMsgId;
+    }
+    // Блокировка и память для передачи аппаратов
+    private final Map<Long, PendingWelderTransfer> pendingWelderTransfers = new ConcurrentHashMap<>();
+    private final Map<Long, Long> activeSenderTransfers = new ConcurrentHashMap<>();
 
     private static final Properties config = new Properties();
     static {
@@ -151,6 +181,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
 
         rows.add(List.of(createBtn("🗓 Мой график", "SCHED_MINE"), createBtn("🤝 С кем я в смене?", "SCHED_WITH_ME")));
         rows.add(List.of(createBtn("👁 График коллеги", "SCHED_COL_LIST"), createBtn("👥 Кто сегодня работает?", "SCHED_TODAY")));
+        rows.add(List.of(createBtn("🔜 Кто работает завтра?", "SCHED_TOMORROW")));
         rows.add(List.of(createBtn("🤒 Сообщить о больничном", "SCHED_SICK")));
 
         List<InlineKeyboardButton> adminRow = new ArrayList<>();
@@ -205,7 +236,11 @@ public class WarehouseBot extends TelegramLongPollingBot {
 
         if (myBusyWelderId != null) {
             sb.insert(statusMsg != null ? sb.indexOf("\n\n") + 2 : 0, "⚠️ <b>На вас сейчас числится: " + myBusyWelderName + "</b>\n\n");
-            rows.add(List.of(createBtn("↩️ ВЕРНУТЬ " + myBusyWelderName.toUpperCase() + " НА БАЗУ", "W_RET:" + myBusyWelderId)));
+            // ДОБАВЛЕНА КНОПКА ПЕРЕДАЧИ
+            rows.add(List.of(
+                    createBtn("↩️ ВЕРНУТЬ НА БАЗУ", "W_RET:" + myBusyWelderId),
+                    createBtn("🔄 Передать коллеге", "W_TRANS_START:" + myBusyWelderId)
+            ));
             sb.append("\n👇 <b>Управление и свободные аппараты:</b>");
         } else {
             sb.append("\n👇 <b>Выберите свобод аппарат, который берете с базы:</b>");
@@ -237,6 +272,32 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 execute(edit);
             }
         } catch (Exception e) { e.printStackTrace(); }
+    }
+
+    private void sendWelderTransferUsersMenu(long chatId, int welderId, int messageId) {
+        List<String[]> users = DatabaseManager.getUsersForToolAssignment();
+        InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
+        List<List<InlineKeyboardButton>> rows = new ArrayList<>();
+        List<InlineKeyboardButton> currentRow = new ArrayList<>();
+
+        for (String[] u : users) {
+            long uId = Long.parseLong(u[0]);
+            if (uId == chatId) continue; // Исключаем самого себя
+            currentRow.add(createBtn("👤 " + u[1], "W_TRANS_SEL:" + welderId + ":" + uId));
+            if (currentRow.size() == 2) {
+                rows.add(currentRow);
+                currentRow = new ArrayList<>();
+            }
+        }
+        if (!currentRow.isEmpty()) rows.add(currentRow);
+        rows.add(List.of(createBtn("🔙 Назад", "W_MAIN_MENU")));
+        markup.setKeyboard(rows);
+
+        EditMessageText edit = new EditMessageText();
+        edit.setChatId(String.valueOf(chatId)); edit.setMessageId(messageId);
+        edit.setText("🔄 <b>Кому передаем " + DatabaseManager.getWelderNameById(welderId) + "?</b>\nВыберите сотрудника из списка:");
+        edit.setParseMode("HTML"); edit.setReplyMarkup(markup);
+        try { execute(edit); } catch (Exception e) {}
     }
 
     private void sendWeldersHistoryMenu(long chatId, int messageId) {
@@ -385,22 +446,51 @@ public class WarehouseBot extends TelegramLongPollingBot {
         }
     }
 
-    private void sendUsersToolSummaryMenu(long chatId) {
+    private void sendUsersToolSummaryMenu(long chatId, Integer messageId, String alertText) {
         List<String[]> users = DatabaseManager.getUsersWithToolCounts();
-        if (users.isEmpty()) { sendMenu(chatId, "ADMIN", "ℹ️ Инструмента на руках нет."); return; }
+        StringBuilder sb = new StringBuilder();
+        if (alertText != null && !alertText.isEmpty()) sb.append(alertText).append("\n\n➖➖➖➖➖➖➖➖➖➖\n");
+
+        if (users.isEmpty()) {
+            sb.append("ℹ️ Инструмента на руках нет.");
+            if (messageId != null) editToolManagementMenu(chatId, messageId, sb.toString());
+            else sendToolManagementMenu(chatId, sb.toString());
+            return;
+        }
+
+        sb.append("👤 <b>Сводка по людям</b>\nВыберите сотрудника:");
         InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
         List<List<InlineKeyboardButton>> rows = new ArrayList<>();
         for (String[] u : users) rows.add(List.of(createBtn(String.format("👤 %s (%s шт.)", u[1], u[2]), "T_SUMM_U:" + u[0])));
-        rows.add(List.of(createBtn("🔙 Назад", "TOOL_MAIN_MENU")));
+        rows.add(List.of(createBtn("🔙 Назад", "tool_menu_main")));
         markup.setKeyboard(rows);
-        SendMessage msg = new SendMessage(String.valueOf(chatId), "👤 <b>Сводка по людям</b>\nВыберите сотрудника:");
-        msg.setParseMode("HTML"); msg.setReplyMarkup(markup); try { execute(msg); } catch (TelegramApiException e) {}
+
+        if (messageId == null) {
+            SendMessage msg = new SendMessage(String.valueOf(chatId), sb.toString());
+            msg.setParseMode("HTML"); msg.setReplyMarkup(markup);
+            try { execute(msg); } catch (TelegramApiException e) {}
+        } else {
+            EditMessageText edit = new EditMessageText();
+            edit.setChatId(String.valueOf(chatId)); edit.setMessageId(messageId);
+            edit.setText(sb.toString()); edit.setParseMode("HTML"); edit.setReplyMarkup(markup);
+            try { execute(edit); } catch (TelegramApiException e) {}
+        }
     }
 
-    private void sendUserToolSummary(long chatId, long targetUserId) {
+    private void sendUserToolSummary(long chatId, long targetUserId, Integer messageId, String alertText) {
         List<String[]> tools = DatabaseManager.getUserAssignedToolsForReturn(targetUserId);
         String userName = DatabaseManager.getUserFullName(targetUserId);
-        if (tools.isEmpty()) { sendMenu(chatId, "ADMIN", "ℹ️ У <b>" + userName + "</b> нет инструмента."); sendUsersToolSummaryMenu(chatId); return; }
+
+        StringBuilder sb = new StringBuilder();
+        if (alertText != null && !alertText.isEmpty()) sb.append(alertText).append("\n\n➖➖➖➖➖➖➖➖➖➖\n");
+
+        if (tools.isEmpty()) {
+            sb.append("ℹ️ У <b>").append(userName).append("</b> нет инструмента.");
+            sendUsersToolSummaryMenu(chatId, messageId, sb.toString());
+            return;
+        }
+
+        sb.append("👤 <b>Инструмент: ").append(userName).append("</b>");
         InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
         List<List<InlineKeyboardButton>> rows = new ArrayList<>();
         for (String[] t : tools) {
@@ -408,10 +498,19 @@ public class WarehouseBot extends TelegramLongPollingBot {
             rows.add(List.of(createBtn(String.format("↩️ Забрать: %s%s", t[1].length() > 15 ? t[1].substring(0, 15) + "…" : t[1], inv), "T_SUMM_RET:" + t[0] + ":" + targetUserId)));
         }
         rows.add(List.of(createBtn("🚨 Вернуть ВСЁ на склад", "T_SUMM_RALL:" + targetUserId)));
-        rows.add(List.of(createBtn("🔙 Назад к списку", "TOOL_MENU_AUDIT_USERS")));
+        rows.add(List.of(createBtn("🔙 Назад к списку", "tool_menu_audit_users")));
         markup.setKeyboard(rows);
-        SendMessage msg = new SendMessage(String.valueOf(chatId), "👤 <b>Инструмент: " + userName + "</b>");
-        msg.setParseMode("HTML"); msg.setReplyMarkup(markup); try { execute(msg); } catch (TelegramApiException e) {}
+
+        if (messageId == null) {
+            SendMessage msg = new SendMessage(String.valueOf(chatId), sb.toString());
+            msg.setParseMode("HTML"); msg.setReplyMarkup(markup);
+            try { execute(msg); } catch (TelegramApiException e) {}
+        } else {
+            EditMessageText edit = new EditMessageText();
+            edit.setChatId(String.valueOf(chatId)); edit.setMessageId(messageId);
+            edit.setText(sb.toString()); edit.setParseMode("HTML"); edit.setReplyMarkup(markup);
+            try { execute(edit); } catch (TelegramApiException e) {}
+        }
     }
 
     private void sendAvailableToolsForAssignment(long chatId, Integer messageId) {
@@ -691,6 +790,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
         KeyboardRow r3 = new KeyboardRow(); r3.add("🧾 Калькулятор квитанции"); r3.add("📋 Тарифы услуг"); keyboard.add(r3);
         KeyboardRow r4 = new KeyboardRow(); r4.add("📸 Плановый осмотр ОРШ"); r4.add("🗓 График работ"); keyboard.add(r4);
         KeyboardRow r5 = new KeyboardRow(); r5.add("🔢 Коды закрытия"); r5.add("📞 Справочник"); keyboard.add(r5);
+        KeyboardRow r6 = new KeyboardRow(); r6.add("🛠 Неисправности"); keyboard.add(r6);
 
         boolean tmAccess = canAccessTm(chatId, role);
 
@@ -1137,7 +1237,24 @@ public class WarehouseBot extends TelegramLongPollingBot {
 
             if ("BANNED".equals(role) || "PENDING".equals(role)) return;
 
+            // Блокировка кнопок для принимающего сварочник
+            if (pendingWelderTransfers.containsKey(chatId)) {
+                if (!data.startsWith("W_TRANS_ACC:") && !data.startsWith("W_TRANS_REJ:")) {
+                    AnswerCallbackQuery ans = new AnswerCallbackQuery();
+                    ans.setCallbackQueryId(update.getCallbackQuery().getId());
+                    ans.setText("⚠️ Сначала примите или отклоните передачу сварочника!");
+                    ans.setShowAlert(true);
+                    try { execute(ans); } catch (Exception e) {}
+                    return;
+                }
+            }
+
             if (data.equals("SCHED_MAIN")) {
+                // Очищаем память, если мы вернулись назад из других меню
+                waitingSickLeaveDate.remove(chatId);
+                waitingScheduleEditUser.remove(chatId);
+                waitingScheduleEditDate.remove(chatId);
+
                 sendScheduleMenu(chatId, role, "🗓 <b>Графики и смены:</b>\nВыберите, что хотите посмотреть:", messageId);
                 return;
             }
@@ -1167,12 +1284,82 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 sendScheduleTextSection(chatId, messageId, DatabaseManager.getTodayRoster());
                 return;
             }
+            // --- КНОПКА "КТО РАБОТАЕТ ЗАВТРА?" ---
+            if (data.equals("SCHED_TOMORROW")) {
+                int dayOfWeek = java.time.LocalDate.now().getDayOfWeek().getValue(); // 1=Пн, 5=Пт, 6=Сб, 7=Вс
+
+                if (dayOfWeek == 5) {
+                    // ПЯТНИЦА: Спрашиваем, какой день нужен
+                    InlineKeyboardMarkup markup = new InlineKeyboardMarkup(List.of(
+                            List.of(createBtn("Сб (Завтра)", "SCHED_DAY_1"), createBtn("Пн (След. рабочий)", "SCHED_DAY_3")),
+                            List.of(createBtn("🔙 Назад", "SCHED_MAIN"), createBtn("❌ Закрыть", "GENERIC_CLOSE"))
+                    ));
+                    EditMessageText edit = new EditMessageText();
+                    edit.setChatId(String.valueOf(chatId)); edit.setMessageId(messageId);
+                    edit.setText("🗓 <b>Уточните дату</b>\n\nВы хотите посмотреть график на выходной день (Суббота) или на следующий рабочий (Понедельник)?");
+                    edit.setParseMode("HTML"); edit.setReplyMarkup(markup);
+                    try { execute(edit); } catch (Exception e) {}
+                } else if (dayOfWeek == 6) {
+                    // СУББОТА: Сразу показываем понедельник (+2 дня)
+                    sendScheduleTextSection(chatId, messageId, DatabaseManager.getTargetDayRoster(2, "Понедельник"));
+                } else if (dayOfWeek == 7) {
+                    // ВОСКРЕСЕНЬЕ: Сразу показываем понедельник (+1 день)
+                    sendScheduleTextSection(chatId, messageId, DatabaseManager.getTargetDayRoster(1, "Понедельник"));
+                } else {
+                    // ПН, ВТ, СР, ЧТ: Сразу показываем завтра (+1 день)
+                    sendScheduleTextSection(chatId, messageId, DatabaseManager.getTargetDayRoster(1, "Завтра"));
+                }
+                return;
+            }
+
+            // Возврат в главное меню ТМ (Выбор: В работе / Закрытые)
+            if (data.equals("TM_MAIN_MENU")) {
+                if (!canAccessTm(chatId, role)) return;
+                JSONArray tasks = fetchTmTasks(chatId);
+                int inProgress = TmClient.countByStatus(tasks, false);
+                int closedCount = TmClient.countByStatus(tasks, true);
+
+                InlineKeyboardMarkup markup = new InlineKeyboardMarkup(List.of(
+                        List.of(createBtn("📋 В работе (" + inProgress + ")", "TM_INPROGRESS")),
+                        List.of(createBtn("✅ Закрытые (" + closedCount + ")", "TM_CLOSED")),
+                        List.of(createBtn("❌ Закрыть панель", "GENERIC_CLOSE"))
+                ));
+
+                EditMessageText edit = new EditMessageText();
+                edit.setChatId(String.valueOf(chatId));
+                edit.setMessageId(messageId);
+                edit.setText("🛠 <b>Мои заявки ТМ</b>\nВыберите раздел:");
+                edit.setParseMode("HTML");
+                edit.setReplyMarkup(markup);
+                try { execute(edit); } catch (Exception e) {}
+                return;
+            }
+
+            // Обработка выбора дня, если сегодня Пятница
+            if (data.startsWith("SCHED_DAY_")) {
+                int offset = Integer.parseInt(data.split("_")[2]);
+                String dayName = (offset == 1) ? "Субботу" : "Понедельник";
+                sendScheduleTextSection(chatId, messageId, DatabaseManager.getTargetDayRoster(offset, dayName));
+                return;
+            }
             if (data.equals("SCHED_SICK")) {
                 String excelName = DatabaseManager.getUserExcelName(chatId);
-                if (excelName == null) { sendClosableMessage(chatId, "ℹ Вы не привязаны к графику."); }
-                else {
-                    waitingSickLeaveDate.put(chatId, true);
-                    sendCancelKeyboard(chatId, "🤒 <b>Оформление больничного</b>\n\nВы оформляете больничный для: <b>" + excelName + "</b>\n\n<i>Пример 1:</i> <code>15.10.2026</code>\n<i>Пример 2:</i> <code>15.10.2026-22.10.2026</code>");
+                if (excelName == null) {
+                    sendScheduleMenu(chatId, role, "ℹ️ Вы не привязаны к графику.", messageId);
+                } else {
+                    waitingSickLeaveDate.put(chatId, messageId); // Запоминаем ID окна для SPA
+
+                    // Используем кнопку Назад, чтобы не убивать меню, а возвращаться
+                    InlineKeyboardMarkup markup = new InlineKeyboardMarkup(List.of(List.of(createBtn("🔙 Назад", "SCHED_MAIN"))));
+
+                    // Жестко используем EditMessageText для изменения текущего пузыря
+                    EditMessageText edit = new EditMessageText();
+                    edit.setChatId(String.valueOf(chatId));
+                    edit.setMessageId(messageId);
+                    edit.setText("🤒 <b>Оформление больничного</b>\n\nВы оформляете больничный для: <b>" + excelName + "</b>\n\nНапишите дни болезни.\n\n<i>Можно писать без года:</i> <code>15.11</code>\n<i>Диапазоны:</i> <code>15.10-22.10</code>\n<i>Даже через запятую:</i> <code>10.11, 14.11-19.11</code>");
+                    edit.setParseMode("HTML");
+                    edit.setReplyMarkup(markup);
+                    try { execute(edit); } catch (Exception e) {}
                 }
                 return;
             }
@@ -1202,6 +1389,44 @@ public class WarehouseBot extends TelegramLongPollingBot {
             if (data.equals("SCHED_ADD") && "ADMIN".equals(role)) {
                 waitingNewEmployeeName.put(chatId, true);
                 sendCancelKeyboard(chatId, "👤 Введите ФИО нового сотрудника (например: <b>Баранов А.В.</b>):");
+                return;
+            }
+
+            // --- РАЗДЕЛ "НЕИСПРАВНОСТИ" ---
+            if (data.equals("ERRORS_MAIN")) {
+                InlineKeyboardMarkup markup = new InlineKeyboardMarkup(List.of(
+                        List.of(createBtn("🌐 Модемы", "ERRORS_MODEMS"), createBtn("📺 Приставки", "ERRORS_STB")),
+                        List.of(createBtn("❌ Закрыть", "GENERIC_CLOSE"))
+                ));
+                EditMessageText edit = new EditMessageText();
+                edit.setChatId(String.valueOf(chatId)); edit.setMessageId(messageId);
+                edit.setText("🛠 <b>Справочник неисправностей</b>\n\nВыберите тип оборудования, чтобы просмотреть частые проблемы:");
+                edit.setParseMode("HTML"); edit.setReplyMarkup(markup);
+                try { execute(edit); } catch (Exception e) {}
+                return;
+            }
+
+            if (data.equals("ERRORS_MODEMS")) {
+                InlineKeyboardMarkup markup = new InlineKeyboardMarkup(List.of(
+                        List.of(createBtn("🔙 Назад", "ERRORS_MAIN"), createBtn("❌ Закрыть", "GENERIC_CLOSE"))
+                ));
+                EditMessageText edit = new EditMessageText();
+                edit.setChatId(String.valueOf(chatId)); edit.setMessageId(messageId);
+                edit.setText(getModemErrorsText());
+                edit.setParseMode("HTML"); edit.setReplyMarkup(markup);
+                try { execute(edit); } catch (Exception e) {}
+                return;
+            }
+
+            if (data.equals("ERRORS_STB")) {
+                InlineKeyboardMarkup markup = new InlineKeyboardMarkup(List.of(
+                        List.of(createBtn("🔙 Назад", "ERRORS_MAIN"), createBtn("❌ Закрыть", "GENERIC_CLOSE"))
+                ));
+                EditMessageText edit = new EditMessageText();
+                edit.setChatId(String.valueOf(chatId)); edit.setMessageId(messageId);
+                edit.setText(getStbErrorsText());
+                edit.setParseMode("HTML"); edit.setReplyMarkup(markup);
+                try { execute(edit); } catch (Exception e) {}
                 return;
             }
 
@@ -1362,7 +1587,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
             // 5. СБРОС ЗАВИСШИХ ЗАЯВОК (БЫВШИЙ /fix)
             if (data.equals("ADM_PANEL_FIX_REQ") && "ADMIN".equals(role)) {
                 try (Connection conn = DatabaseManager.getConnection(); Statement stmt = conn.createStatement()) {
-                    stmt.execute("DELETE FROM return_requests");
+                    stmt.execute("DELETE FROM return_requests WHERE status = 'PENDING'");
                     EditMessageText edit = new EditMessageText();
                     edit.setChatId(String.valueOf(chatId)); edit.setMessageId(messageId);
                     edit.setText("✅ <b>Все зависшие заявки на возврат успешно очищены!</b>");
@@ -1374,7 +1599,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 return;
             }
             if (data.equals("CANCEL_PROMPT")) {
-                waitingNameFix.remove(chatId); waitingTakeMaterialId.remove(chatId); writeOffSessions.remove(chatId); fileWaitState.remove(chatId);
+                waitingNameFix.remove(chatId); waitingTakeMaterialId.remove(chatId); writeOffCartSessions.remove(chatId); fileWaitState.remove(chatId);
                 waitingToolWriteOffReason.remove(chatId); waitingOrshPhoto.remove(chatId); waitingOrshProblemReason.remove(chatId);
                 waitingDirContactCat.remove(chatId); waitingScheduleEditUser.remove(chatId); waitingScheduleEditDate.remove(chatId);
                 waitingNewEmployeeName.remove(chatId); waitingSickLeaveDate.remove(chatId); waitingTmReportTaskId.remove(chatId); tmAuthStep.remove(chatId);
@@ -1387,18 +1612,16 @@ public class WarehouseBot extends TelegramLongPollingBot {
 
             if (data.startsWith("tool_menu_")) {
                 switch (data) {
-                    case "tool_menu_main" -> editToolManagementMenu(chatId, messageId);
-                    case "tool_menu_close" -> {
-                        DeleteMessage delete = new DeleteMessage(String.valueOf(chatId), messageId);
-                        try { execute(delete); } catch (Exception e) {}
+                    case "tool_menu_main" -> {
+                        waitingToolWriteOffReason.remove(chatId);
+                        editToolManagementMenu(chatId, messageId);
                     }
-
-                    // --- ТЕКСТОВЫЕ РАЗДЕЛЫ (Открываются прямо в этом же сообщении) ---
+                    case "tool_menu_close" -> {
+                        try { execute(new DeleteMessage(String.valueOf(chatId), messageId)); } catch (Exception e) {}
+                    }
                     case "tool_menu_audit" -> {
                         try { execute(new DeleteMessage(String.valueOf(chatId), messageId)); } catch (Exception e) {}
-                        // Выводим большую сводку старым методом (он умеет резать текст на части)
                         sendMenu(chatId, role, DatabaseManager.getToolsAuditText());
-                        // И сразу возвращаем панель управления вниз для удобства
                         sendToolManagementMenu(chatId);
                     }
                     case "tool_menu_archive" -> {
@@ -1412,18 +1635,13 @@ public class WarehouseBot extends TelegramLongPollingBot {
                         int successCount = 0;
                         for (Long workerId : workersWithMaterials) {
                             try {
-                                SendMessage msg = new SendMessage(String.valueOf(workerId), "⚠ <b>ВНИМАНИЕ: АУДИТ ОСТАТКОВ!</b> ⚠️\n\nНапоминаем о необходимости закрыть подотчет до конца месяца. Пожалуйста, <b>спишите</b> использованные материалы в квитанции или <b>верните</b> остатки на склад!\n\n" + DatabaseManager.getUserBalanceText(workerId));
+                                SendMessage msg = new SendMessage(String.valueOf(workerId), "⚠ <b>ВНИМАНИЕ: АУДИТ ОСТАТКОВ!</b> ⚠️\n\nНапоминаем о необходимости закрыть подотчет до конца месяца. Пожалуйста, <b>спишите</b> или <b>верните</b> материалы.\n\n" + DatabaseManager.getUserBalanceText(workerId));
                                 msg.setParseMode("HTML"); execute(msg); successCount++;
                             } catch (TelegramApiException e) {}
                         }
                         showToolMenuSection(chatId, messageId, "✅ Уведомления об аудите успешно доставлены <b>" + successCount + "</b> сотрудникам!");
                     }
-
-                    // --- ИНТЕРАКТИВНЫЕ РАЗДЕЛЫ (Удаляют главное меню и запускают ваши старые методы) ---
-                    case "tool_menu_audit_users" -> {
-                        try { execute(new DeleteMessage(String.valueOf(chatId), messageId)); } catch (Exception e) {}
-                        sendUsersToolSummaryMenu(chatId);
-                    }
+                    case "tool_menu_audit_users" -> sendUsersToolSummaryMenu(chatId, messageId, null);
                     case "tool_menu_give" -> sendAvailableToolsForAssignment(chatId, messageId);
                     case "tool_menu_return" -> sendUsersForToolReturn(chatId, messageId);
                     case "tool_menu_restore" -> sendToolsForRestore(chatId, messageId);
@@ -1439,6 +1657,65 @@ public class WarehouseBot extends TelegramLongPollingBot {
                         try { execute(edit); } catch (Exception e) {}
                     }
                 }
+                return;
+            }
+
+            if (data.startsWith("T_SUMM_U:") && "ADMIN".equals(role)) {
+                sendUserToolSummary(chatId, Long.parseLong(data.split(":")[1]), messageId, null);
+                return;
+            }
+            if (data.startsWith("T_SUMM_RET:") && "ADMIN".equals(role)) {
+                String[] parts = data.split(":");
+                String res = DatabaseManager.returnToolToWarehouse(Integer.parseInt(parts[1]));
+                sendUserToolSummary(chatId, Long.parseLong(parts[2]), messageId, res);
+                return;
+            }
+            if (data.startsWith("T_SUMM_RALL:") && "ADMIN".equals(role)) {
+                String res = DatabaseManager.returnAllUserToolsToWarehouse(Long.parseLong(data.split(":")[1]));
+                sendUsersToolSummaryMenu(chatId, messageId, res);
+                return;
+            }
+
+            if (data.startsWith("T_SEL_N:") && "ADMIN".equals(role)) { sendUsersForToolAssignment(chatId, Integer.parseInt(data.split(":")[1]), messageId); return; }
+            if (data.startsWith("T_ASS_U:") && "ADMIN".equals(role)) {
+                String[] parts = data.split(":");
+                long targetUserId = Long.parseLong(parts[2]);
+                String result = DatabaseManager.assignTool(Integer.parseInt(parts[1]), targetUserId);
+                editToolManagementMenu(chatId, messageId, result);
+                if (result.startsWith("✅") && targetUserId != chatId) sendDirectNotification(targetUserId, "🔔 <b>Вам выдан новый инструмент!</b>\nМОЛ закрепил за вами новую позицию.");
+                return;
+            }
+
+            if (data.startsWith("T_RET_U:") && "ADMIN".equals(role)) { sendUserToolsForReturn(chatId, Long.parseLong(data.split(":")[1]), messageId); return; }
+            if (data.startsWith("T_RET_T:") && "ADMIN".equals(role)) {
+                String res = DatabaseManager.returnToolToWarehouse(Integer.parseInt(data.split(":")[1]));
+                editToolManagementMenu(chatId, messageId, res);
+                return;
+            }
+
+            if (data.startsWith("T_WO_LOC:") && "ADMIN".equals(role)) {
+                if (data.split(":")[1].equals("STOCK")) sendGroupsForToolWriteOff(chatId, messageId);
+                else sendUsersForToolWriteOff(chatId, messageId);
+                return;
+            }
+            if (data.startsWith("T_WO_U:") && "ADMIN".equals(role)) { sendUserToolsForWriteOff(chatId, Long.parseLong(data.split(":")[1]), messageId); return; }
+            if (data.startsWith("T_WO_G:") && "ADMIN".equals(role)) { sendSpecificToolsInStockForWriteOff(chatId, Integer.parseInt(data.split(":")[1]), messageId); return; }
+            if (data.startsWith("T_WO_DO:") && "ADMIN".equals(role)) {
+                int toolId = Integer.parseInt(data.split(":")[1]);
+                waitingToolWriteOffReason.put(chatId, toolId);
+
+                InlineKeyboardMarkup markup = new InlineKeyboardMarkup(List.of(List.of(createBtn("❌ Отменить", "tool_menu_main"))));
+                EditMessageText edit = new EditMessageText();
+                edit.setChatId(String.valueOf(chatId)); edit.setMessageId(messageId);
+                edit.setText("✍️ Выбран инструмент: <b>" + DatabaseManager.getToolNameAndInvById(toolId) + "</b>\n\nВведите <b>причину списания</b> (например: утерян, сломался):");
+                edit.setParseMode("HTML"); edit.setReplyMarkup(markup);
+                try { execute(edit); } catch (Exception e) {}
+                return;
+            }
+
+            if (data.startsWith("T_RES_DO:") && "ADMIN".equals(role)) {
+                String res = DatabaseManager.restoreToolToStock(Integer.parseInt(data.split(":")[1]));
+                editToolManagementMenu(chatId, messageId, res);
                 return;
             }
 
@@ -1461,13 +1738,11 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 String resultMsg = DatabaseManager.takeMaterialFromWarehouse(chatId, matId, qtyToTake);
                 sendWarehousePage(chatId, page, messageId, resultMsg);
 
-                // --- НОВЫЙ БЛОК: ВСПЛЫВАЮЩИЙ TOAST ---
                 AnswerCallbackQuery answer = new AnswerCallbackQuery();
                 answer.setCallbackQueryId(update.getCallbackQuery().getId());
                 answer.setText("✅ Успешно! Добавлено в подотчет.");
-                answer.setShowAlert(false); // false делает уведомление исчезающим (сверху экрана)
+                answer.setShowAlert(false);
                 try { execute(answer); } catch (TelegramApiException e) {}
-                // -------------------------------------
 
                 return;
             }
@@ -1480,7 +1755,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
             }
 
             if (data.equals("TM_CLOSE")) {
-                clearPreviousTmTasks(chatId); // Удаляет все карточки заявок!
+                clearPreviousTmTasks(chatId);
                 return;
             }
 
@@ -1523,6 +1798,11 @@ public class WarehouseBot extends TelegramLongPollingBot {
                     }
                     DatabaseManager.updateSickLeaveRequestStatus(requestId, "APPROVED");
                     sendDirectNotification(empChatId, "✅ Ваш больничный (" + displayDate + ") подтвержден руководителем и внесен в график.");
+
+                    // --- НОВОЕ: Уведомляем Козлова и Белевича ТОЛЬКО ПОСЛЕ одобрения админом ---
+                    String managerMsg = "🚨 <b>ВНИМАНИЕ: Больничный!</b>\nСотрудник <b>" + excelName + "</b> уходит на больничный.\nПериод: <b>" + displayDate + "</b>\n<i>Администратор одобрил, график обновлен.</i>";
+                    notifyManagersAboutSickLeave(managerMsg);
+
                 } else {
                     DatabaseManager.updateSickLeaveRequestStatus(requestId, "REJECTED");
                     sendDirectNotification(empChatId, "❌ Ваш больничный (" + displayDate + ") отклонен руководителем. Обратитесь к нему за разъяснением.");
@@ -1532,6 +1812,8 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 edit.setChatId(String.valueOf(chatId));
                 edit.setMessageId(update.getCallbackQuery().getMessage().getMessageId());
                 edit.setText((approve ? "✅ Подтверждено: " : "❌ Отклонено: ") + excelName + ", " + displayDate);
+                // 👇 ДОБАВЛЕНА ЭТА СТРОКА:
+                edit.setReplyMarkup(new InlineKeyboardMarkup(List.of(List.of(createBtn("❌ Закрыть", "GENERIC_CLOSE")))));
                 try { execute(edit); } catch (TelegramApiException e) {}
 
                 try { execute(answer); } catch (TelegramApiException e) {}
@@ -1548,7 +1830,6 @@ public class WarehouseBot extends TelegramLongPollingBot {
             if (data.equals("TM_REFRESH")) {
                 if (!canAccessTm(chatId, role)) return;
 
-                // Визуальный отклик: меняем текст кнопки на "Загрузка", чтобы мастер видел, что бот не завис
                 EditMessageText edit = new EditMessageText();
                 edit.setChatId(String.valueOf(chatId));
                 edit.setMessageId(messageId);
@@ -1556,8 +1837,6 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 edit.setParseMode("HTML");
                 try { execute(edit); } catch (Exception e) {}
 
-                // Получаем свежие данные с сервера.
-                // Внутри sendTmInProgressList старые сообщения будут удалены, а новые отрисованы.
                 JSONArray tasks = fetchTmTasks(chatId);
                 sendTmInProgressList(chatId, role, tasks);
 
@@ -1578,7 +1857,6 @@ public class WarehouseBot extends TelegramLongPollingBot {
             if ("TM_INPROGRESS".equals(data)) {
                 if (!canAccessTm(chatId, role)) return;
 
-                // Удаляем меню выбора разделов ТМ
                 Integer menuId = tmMenuMessageIds.remove(chatId);
                 if (menuId != null) {
                     try { execute(new DeleteMessage(String.valueOf(chatId), menuId)); } catch (Exception e) {}
@@ -1594,18 +1872,31 @@ public class WarehouseBot extends TelegramLongPollingBot {
             if ("TM_CLOSED".equals(data)) {
                 if (!canAccessTm(chatId, role)) return;
                 JSONArray tasks = fetchTmTasks(chatId);
-                sendClosableMessage(chatId, TmClient.formatTasksText(tasks, true)); // Изменено здесь!
+
+                // Используем EditMessageText для текущего окна
+                EditMessageText edit = new EditMessageText();
+                edit.setChatId(String.valueOf(chatId));
+                edit.setMessageId(messageId);
+                edit.setText(TmClient.formatTasksText(tasks, true));
+                edit.setParseMode("HTML");
+
+                // Кнопка возврата к выбору заявок
+                InlineKeyboardMarkup markup = new InlineKeyboardMarkup(List.of(
+                        List.of(createBtn("🔙 Назад к меню ТМ", "TM_MAIN_MENU"))
+                ));
+                edit.setReplyMarkup(markup);
+
+                try { execute(edit); } catch (TelegramApiException e) {}
+
                 AnswerCallbackQuery answer = new AnswerCallbackQuery();
                 answer.setCallbackQueryId(update.getCallbackQuery().getId());
                 try { execute(answer); } catch (TelegramApiException e) {}
                 return;
             }
-            // --- ОТМЕНА ОФОРМЛЕНИЯ ОТЧЕТА: ВОЗВРАТ К СПИСКУ ЗАЯВОК В РАБОТЕ ---
             if (data.equals("TM_REP_CANCEL")) {
                 TmReportSession session = tmReportSessions.remove(chatId);
                 try { execute(new DeleteMessage(String.valueOf(chatId), messageId)); } catch (Exception e) {}
 
-                // Загружаем и показываем список заявок в работе
                 JSONArray tasks = fetchTmTasks(chatId);
                 sendTmInProgressList(chatId, role, tasks);
 
@@ -1619,13 +1910,11 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 if (!canAccessTm(chatId, role)) return;
                 String taskId = data.substring("TM_REPORT:".length());
 
-                // Удаляем верхнее меню разделов, если оно ещё осталось
                 Integer menuId = tmMenuMessageIds.remove(chatId);
                 if (menuId != null) {
                     try { execute(new DeleteMessage(String.valueOf(chatId), menuId)); } catch (Exception e) {}
                 }
 
-                // Удаляем все остальные карточки и кнопку "Обновить"
                 List<Integer> activeMsgs = tmActiveTaskMessages.remove(chatId);
                 if (activeMsgs != null) {
                     for (Integer id : activeMsgs) {
@@ -1698,7 +1987,12 @@ public class WarehouseBot extends TelegramLongPollingBot {
                     String repTxt = "Выполнил служебное поручение";
                     String tmSess = DatabaseManager.getTmSession(chatId);
                     boolean ok = tmSess != null && TmClient.performTask(tmSess, session.taskId, repTxt);
-                    if (ok) updateReportUI(chatId, session, "✅ Отчёт #" + session.taskId + " отправлен:\n<i>" + repTxt + "</i>", new InlineKeyboardMarkup(List.of(List.of(createBtn("❌ Закрыть", "CANCEL_PROMPT")))));
+                    if (ok) {
+                        updateReportUI(chatId, session, "✅ Отчёт #" + session.taskId + " отправлен:\n<i>" + repTxt + "</i>", new InlineKeyboardMarkup(List.of(
+                                // ИСПОЛЬЗУЕМ TM_REP_CANCEL ДЛЯ ИДЕАЛЬНОГО ВОЗВРАТА К СПИСКУ
+                                List.of(createBtn("📋 Вернуться к заявкам", "TM_REP_CANCEL"))
+                        )));
+                    }
                 }
                 return;
             }
@@ -1738,7 +2032,6 @@ public class WarehouseBot extends TelegramLongPollingBot {
             if (data.equals("TM_REP_MAT_DONE")) {
                 TmReportSession session = tmReportSessions.get(chatId); if (session == null) return;
 
-                // ЕСЛИ МЫ РЕДАКТИРОВАЛИ МАТЕРИАЛЫ — СРАЗУ В ПРЕВЬЮ!
                 if (session.isEditing) {
                     session.isEditing = false;
                     session.step = "PREVIEW";
@@ -1750,12 +2043,61 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 return;
             }
 
-            // Быстрый возврат в превью без изменений
             if (data.equals("TM_REP_PREVIEW")) {
                 TmReportSession session = tmReportSessions.get(chatId); if (session == null) return;
                 session.isEditing = false;
                 session.step = "PREVIEW";
                 showTmReportPreview(chatId, session, session.anchorMsgId);
+                return;
+            }
+
+            if (data.equals("TM_REP_SEND")) {
+                TmReportSession session = tmReportSessions.remove(chatId);
+                if (session == null) return;
+
+                List<String> tmParts = new ArrayList<>();
+                if ("PON".equals(session.type) && !session.closingCode.isEmpty()) {
+                    tmParts.add("КОД " + session.closingCode);
+                }
+                if (session.hasReceipt && !session.receiptNumber.isEmpty()) {
+                    tmParts.add("квитанция #" + session.receiptNumber);
+                }
+                if (!session.reportText.isEmpty()) {
+                    tmParts.add(session.reportText);
+                }
+                if (!session.retailStatus.isEmpty()) {
+                    tmParts.add(session.retailStatus);
+                }
+                String finalReportText = String.join(", ", tmParts);
+
+                String tmSession = DatabaseManager.getTmSession(chatId);
+                boolean sentToTm = tmSession != null && TmClient.performTask(tmSession, session.taskId, finalReportText);
+
+                for (DatabaseManager.ReceiptItem item : session.usedMaterials) {
+                    WriteOffSession wo = new WriteOffSession();
+                    wo.materialId = item.dbId;
+                    wo.quantity = item.quantity;
+                    wo.unit = item.unit;
+                    wo.priceWithVat = item.priceWithVatPerUnit;
+                    wo.materialName = item.name;
+                    wo.isPaidReceipt = session.hasReceipt;
+                    wo.receiptNumber = session.receiptNumber;
+                    wo.closingCode = session.closingCode;
+                    wo.reason = "Закрытие заявки ТМ #" + session.taskId;
+                    wo.phoneNumber = "-";
+                    wo.contractNumber = "-";
+                    wo.address = "-";
+                    DatabaseManager.completeWriteOff(chatId, wo);
+                }
+
+                String statusMsg = sentToTm
+                        ? "✅ <b>Отчет по заявке #" + session.taskId + " успешно отправлен в ТМ!</b>\n\nТекст отчета:\n<code>" + finalReportText + "</code>"
+                        : "⚠️ Материалы списаны, но <b>не удалось отправить отчет в ТМ</b> (проверьте подключение или статус заявки).";
+
+                updateReportUI(chatId, session, statusMsg, new InlineKeyboardMarkup(List.of(
+                        // ИСПОЛЬЗУЕМ TM_REP_CANCEL ДЛЯ ИДЕАЛЬНОГО ВОЗВРАТА К СПИСКУ
+                        List.of(createBtn("📋 Вернуться к заявкам", "TM_REP_CANCEL"))
+                )));
                 return;
             }
 
@@ -1770,10 +2112,9 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 return;
             }
 
-            // Нажали «Изменить текст»
             if (data.equals("TM_REP_EDIT_TXT")) {
                 TmReportSession session = tmReportSessions.get(chatId); if (session == null) return;
-                session.isEditing = true; // 👈 Включаем режим редактирования
+                session.isEditing = true;
                 session.step = "WAIT_REPORT_TEXT";
                 InlineKeyboardMarkup markup = new InlineKeyboardMarkup(List.of(
                         List.of(createBtn("🔙 Назад в превью", "TM_REP_PREVIEW"))
@@ -1781,11 +2122,11 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 updateReportUI(chatId, session, "📝 <b>Изменение текста</b>\n\nНапишите новый текст отчета для диспетчера:", markup);
                 return;
             }
-            // Нажали «Изменить материалы»
+
             if (data.equals("TM_REP_EDIT_MAT")) {
                 TmReportSession session = tmReportSessions.get(chatId); if (session == null) return;
-                session.isEditing = true; // 👈 Включаем режим редактирования
-                session.usedMaterials.clear(); // Очищаем список для нового выбора
+                session.isEditing = true;
+                session.usedMaterials.clear();
                 session.step = "WAIT_MATERIALS";
                 sendMaterialSelectionForReport(chatId, session, session.anchorMsgId);
                 return;
@@ -1825,7 +2166,6 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 if (!canAccessTm(chatId, role)) return;
                 String taskId = data.substring("TM_BACK:".length());
 
-                // Получаем свежий список заявок
                 JSONArray tasks = fetchTmTasks(chatId);
                 if (tasks != null) {
                     JSONObject currentTask = null;
@@ -1842,7 +2182,6 @@ public class WarehouseBot extends TelegramLongPollingBot {
                         String reportBtnText = "📝 Отправить отчёт";
                         String cardText = tmOriginalCardText.get(messageId);
 
-                        // Если оригинальный текст потерялся, генерируем его заново
                         if (cardText == null) {
                             cardText = TmClient.formatTask(currentTask);
                         }
@@ -1855,12 +2194,11 @@ public class WarehouseBot extends TelegramLongPollingBot {
                             }
                         } else if (taskStatus == 2) {
                             reportBtnText = "⚠️ ДОРАБОТАТЬ (Отправить заново)";
-                            // Если карточку пришлось генерировать заново, добавляем шапку с причиной
                             if (!cardText.contains("ВОЗВРАТ НА ДОРАБОТКУ")) {
                                 String rejectReason = currentTask.optString("task_note", "Причина не указана");
                                 if (rejectReason.isEmpty() || rejectReason.equals("null")) rejectReason = "Причина не указана диспетчером";
                                 cardText = "❌ <b>ВОЗВРАТ НА ДОРАБОТКУ!</b>\n💬 <i>Причина: " + rejectReason + "</i>\n➖➖➖➖➖➖➖➖➖➖\n" + cardText;
-                                tmOriginalCardText.put(messageId, cardText); // обновляем память
+                                tmOriginalCardText.put(messageId, cardText);
                             }
                         }
 
@@ -1911,8 +2249,15 @@ public class WarehouseBot extends TelegramLongPollingBot {
 
             if (data.startsWith("ED_SCH_U:") && canEditSchedule(chatId, role)) {
                 String excelName = data.substring(9);
-                waitingScheduleEditUser.put(chatId, excelName);
-                sendCancelKeyboard(chatId, "✏️ Выбран сотрудник: <b>" + excelName + "</b>\n\nНапишите дату ИЛИ период дат, которые нужно изменить.\n\n<i>Пример 1:</i> <code>15.11.2026</code>\n<i>Пример 2:</i> <code>01.11.2026-07.11.2026</code>");
+                // Сохраняем имя и ID текущего окна для идеального SPA
+                waitingScheduleEditUser.put(chatId, excelName + ":" + messageId);
+
+                InlineKeyboardMarkup markup = new InlineKeyboardMarkup(List.of(List.of(createBtn("❌ Отменить", "CANCEL_PROMPT"))));
+                EditMessageText edit = new EditMessageText();
+                edit.setChatId(String.valueOf(chatId)); edit.setMessageId(messageId);
+                edit.setText("✏️ Выбран сотрудник: <b>" + excelName + "</b>\n\nНапишите дни, которые нужно изменить.\n\n<i>Можно писать без года:</i> <code>15.11</code>\n<i>Через запятую:</i> <code>10.11.2026, 15.11.26, 20.11</code>\n<i>Диапазоны:</i> <code>01.11-07.11</code>\n<i>Даже всё вместе:</i> <code>10.11, 14.11-19.11</code>");
+                edit.setParseMode("HTML"); edit.setReplyMarkup(markup);
+                try { execute(edit); } catch (Exception e) {}
                 return;
             }
 
@@ -1921,9 +2266,11 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 String savedData = waitingScheduleEditDate.remove(chatId);
                 if (savedData == null) { sendMenu(chatId, role, "❌ Ошибка сессии редактирования. Начните заново."); return; }
 
-                String[] mainParts = savedData.split(":", 2);
+                // Достаем сохраненный messageId окна, если он есть
+                String[] mainParts = savedData.split(":");
                 String targetUser = mainParts[0];
                 String dateRangeStr = mainParts[1];
+                Integer anchorMsgId = mainParts.length > 2 ? Integer.parseInt(mainParts[2]) : messageId;
 
                 String statusCode = ""; String start = ""; String end = "";
                 if (payload.equals("В") || payload.equals("О") || payload.equals("Д") || payload.equals("Б") || payload.equals("А") || payload.equals("Г") || payload.equals("П")) {
@@ -1933,37 +2280,34 @@ public class WarehouseBot extends TelegramLongPollingBot {
                     start = times[0]; end = times[1];
                 }
 
-                java.time.format.DateTimeFormatter dtf = java.time.format.DateTimeFormatter.ofPattern("dd.MM.yyyy");
-                java.time.LocalDate startDate;
-                java.time.LocalDate endDate;
-                String displayDate;
-
                 try {
-                    if (dateRangeStr.contains("-")) {
-                        String[] dParts = dateRangeStr.split("-");
-                        startDate = java.time.LocalDate.parse(dParts[0], dtf);
-                        endDate = java.time.LocalDate.parse(dParts[1], dtf);
-                        displayDate = "период с " + dateRangeStr.replace("-", " по ");
-                    } else {
-                        startDate = java.time.LocalDate.parse(dateRangeStr, dtf);
-                        endDate = startDate;
-                        displayDate = dateRangeStr;
-                    }
+                    java.time.format.DateTimeFormatter dtf = java.time.format.DateTimeFormatter.ofPattern("dd.MM.yyyy");
+                    String[] dateStrings = dateRangeStr.split(",");
 
-                    java.time.LocalDate current = startDate;
-                    while (!current.isAfter(endDate)) {
+                    int firstYear = 0;
+                    int firstMonth = 0;
+
+                    for (String ds : dateStrings) {
+                        java.time.LocalDate current = java.time.LocalDate.parse(ds, dtf);
                         DatabaseManager.updateSingleShift(targetUser, current.getYear(), current.getMonthValue(), current.getDayOfMonth(), statusCode, start, end);
-                        current = current.plusDays(1);
+                        if (firstYear == 0) { firstYear = current.getYear(); firstMonth = current.getMonthValue(); }
                     }
 
-                    sendScheduleMenu(chatId, role, "✅ График сотрудника <b>" + targetUser + "</b> успешно изменен (" + displayDate + ")!", null);                    sendScheduleView(chatId, targetUser, startDate.getYear(), startDate.getMonthValue(), false, null);
+                    // Обновляем окно графика, опираясь на первую измененную дату
+                    sendScheduleView(chatId, targetUser, firstYear, firstMonth, false, anchorMsgId);
 
                     Long targetUserId = DatabaseManager.getUserIdByExcelName(targetUser);
                     if (targetUserId != null) {
-                        sendDirectNotification(targetUserId, "⚠ <b>ВНИМАНИЕ!</b>\nАдминистратор изменил ваш график!\nДата: <b>" + displayDate + "</b>\nНовая смена/статус: <b>" + (statusCode.isEmpty() ? payload : statusCode) + "</b>");
+                        sendDirectNotification(targetUserId, "⚠ <b>ВНИМАНИЕ!</b>\nАдминистратор изменил ваш график!\nДата(ы): <b>" + (dateStrings.length > 2 ? dateStrings.length + " дн." : dateRangeStr) + "</b>\nНовая смена/статус: <b>" + (statusCode.isEmpty() ? payload : statusCode) + "</b>");
                     }
+
+                    AnswerCallbackQuery ans = new AnswerCallbackQuery();
+                    ans.setCallbackQueryId(update.getCallbackQuery().getId());
+                    ans.setText("✅ График успешно изменен!");
+                    try { execute(ans); } catch (Exception e) {}
+
                 } catch (Exception e) {
-                    sendMenu(chatId, role, "❌ Ошибка при обработке дат.");
+                    sendMenu(chatId, role, "❌ Ошибка при сохранении дат.");
                 }
                 return;
             }
@@ -2002,7 +2346,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
             }
             if (data.startsWith("W_TAKE:")) {
                 int welderId = Integer.parseInt(data.split(":")[1]);
-                if (DatabaseManager.takeWelder(welderId, chatId, null)) {
+                if (DatabaseManager.takeWelder(welderId, chatId, (Long) null)) {
                     if (chatId != DatabaseManager.ADMIN_ID) {
                         sendDirectNotification(DatabaseManager.ADMIN_ID, "ℹ️ <b>Сварочный аппарат взят!</b>\n👷‍♂ " + DatabaseManager.getUserFullName(chatId) + " взял аппарат <b>" + DatabaseManager.getWelderNameById(welderId) + "</b>.");
                     }
@@ -2020,9 +2364,125 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 }
                 return;
             }
+
+            if (data.startsWith("W_TRANS_START:")) {
+                int welderId = Integer.parseInt(data.split(":")[1]);
+                sendWelderTransferUsersMenu(chatId, welderId, messageId);
+                return;
+            }
+
+            if (data.startsWith("W_TRANS_SEL:")) {
+                String[] p = data.split(":");
+                int welderId = Integer.parseInt(p[1]);
+                long receiverId = Long.parseLong(p[2]);
+
+                if (pendingWelderTransfers.containsKey(receiverId)) {
+                    AnswerCallbackQuery ans = new AnswerCallbackQuery();
+                    ans.setCallbackQueryId(update.getCallbackQuery().getId());
+                    ans.setText("❌ Этот сотрудник сейчас уже рассматривает другой запрос!");
+                    ans.setShowAlert(true);
+                    try { execute(ans); } catch (Exception e) {}
+                    return;
+                }
+
+                PendingWelderTransfer pt = new PendingWelderTransfer();
+                pt.welderId = welderId;
+                pt.senderId = chatId;
+                pt.receiverId = receiverId;
+                pt.senderMsgId = messageId;
+
+                pendingWelderTransfers.put(receiverId, pt);
+                activeSenderTransfers.put(chatId, receiverId);
+
+                // 1. Блокируем принимающего новым сообщением
+                InlineKeyboardMarkup recMarkup = new InlineKeyboardMarkup(List.of(
+                        List.of(createBtn("✅ Принять", "W_TRANS_ACC:" + welderId + ":" + chatId),
+                                createBtn("❌ Отказаться", "W_TRANS_REJ:" + welderId + ":" + chatId))
+                ));
+                SendMessage recMsg = new SendMessage(String.valueOf(receiverId), "🚨 <b>ПЕРЕДАЧА ОБОРУДОВАНИЯ!</b>\n\nКоллега <b>" + firstName + "</b> передает вам сварочный аппарат <b>" + DatabaseManager.getWelderNameById(welderId) + "</b>.\n\n👇 Подтвердите получение:");
+                recMsg.setParseMode("HTML"); recMsg.setReplyMarkup(recMarkup);
+                try { var sent = execute(recMsg); pt.receiverMsgId = sent.getMessageId(); } catch (Exception e) {}
+
+                // 2. Окно передающего уходит в ожидание (SPA)
+                String receiverName = DatabaseManager.getUserFullName(receiverId);
+                InlineKeyboardMarkup sndMarkup = new InlineKeyboardMarkup(List.of(List.of(createBtn("🚫 Отменить передачу", "W_TRANS_CANCEL:" + welderId))));
+                EditMessageText edit = new EditMessageText();
+                edit.setChatId(String.valueOf(chatId)); edit.setMessageId(messageId);
+                edit.setText("⏳ <b>Ожидание подтверждения...</b>\n\nВы передаете аппарат <b>" + DatabaseManager.getWelderNameById(welderId) + "</b> сотруднику <b>" + receiverName + "</b>.\nЗапрос отправлен, ожидаем решения...");
+                edit.setParseMode("HTML"); edit.setReplyMarkup(sndMarkup);
+                try { execute(edit); } catch (Exception e) {}
+                return;
+            }
+
+            if (data.startsWith("W_TRANS_CANCEL:")) {
+                Long recId = activeSenderTransfers.remove(chatId);
+                if (recId != null) {
+                    PendingWelderTransfer pt = pendingWelderTransfers.remove(recId);
+                    if (pt != null && pt.receiverMsgId != null) {
+                        try { execute(new DeleteMessage(String.valueOf(recId), pt.receiverMsgId)); } catch (Exception e) {}
+                        sendDirectNotification(recId, "ℹ️ Коллега отменил передачу сварочного аппарата.");
+                    }
+                }
+                sendWeldersMenu(chatId, role, messageId, "🚫 Вы отменили передачу аппарата.");
+                return;
+            }
+
+            if (data.startsWith("W_TRANS_ACC:")) {
+                String[] p = data.split(":");
+                int welderId = Integer.parseInt(p[1]);
+                long senderId = Long.parseLong(p[2]);
+
+                PendingWelderTransfer pt = pendingWelderTransfers.remove(chatId);
+                activeSenderTransfers.remove(senderId);
+
+                // Запись в БД с проверкой успеха
+                boolean success = DatabaseManager.transferWelder(welderId, senderId, chatId);
+                if (!success) {
+                    AnswerCallbackQuery ans = new AnswerCallbackQuery();
+                    ans.setCallbackQueryId(update.getCallbackQuery().getId());
+                    ans.setText("❌ Ошибка базы данных! Сварочник не передан.");
+                    ans.setShowAlert(true);
+                    try { execute(ans); } catch (Exception e) {}
+                    return;
+                }
+
+                // Окно принимающего
+                EditMessageText edit = new EditMessageText();
+                edit.setChatId(String.valueOf(chatId)); edit.setMessageId(messageId);
+                edit.setText("✅ <b>Вы успешно приняли сварочный аппарат!</b>");
+                edit.setParseMode("HTML"); edit.setReplyMarkup(new InlineKeyboardMarkup(List.of(List.of(createBtn("❌ Закрыть", "GENERIC_CLOSE")))));
+                try { execute(edit); } catch (Exception e) {}
+
+                // SPA обновление окна передающего
+                if (pt != null && pt.senderMsgId != null) {
+                    sendWeldersMenu(senderId, DatabaseManager.getUserRole(senderId, "Сотрудник"), pt.senderMsgId, "✅ Коллега подтвердил прием сварочника!");
+                }
+                return;
+            }
+
+            if (data.startsWith("W_TRANS_REJ:")) {
+                String[] p = data.split(":");
+                long senderId = Long.parseLong(p[2]);
+
+                PendingWelderTransfer pt = pendingWelderTransfers.remove(chatId);
+                activeSenderTransfers.remove(senderId);
+
+                // Окно принимающего
+                EditMessageText edit = new EditMessageText();
+                edit.setChatId(String.valueOf(chatId)); edit.setMessageId(messageId);
+                edit.setText("❌ Вы отказались от приема сварочного аппарата.");
+                edit.setParseMode("HTML"); edit.setReplyMarkup(new InlineKeyboardMarkup(List.of(List.of(createBtn("❌ Закрыть", "GENERIC_CLOSE")))));
+                try { execute(edit); } catch (Exception e) {}
+
+                // SPA обновление окна передающего
+                if (pt != null && pt.senderMsgId != null) {
+                    sendWeldersMenu(senderId, DatabaseManager.getUserRole(senderId, "Сотрудник"), pt.senderMsgId, "❌ Коллега отказался принять сварочник.");
+                }
+                return;
+            }
+
             if (data.equals("W_KEEP_TOMORROW")) {
                 forceWelderReturnIds.remove(chatId);
-                // Запоминаем, что именно СЕГОДНЯ этот человек уже продлил аппарат
                 keptWelderForTomorrow.put(chatId, LocalDate.now());
 
                 try { execute(new DeleteMessage(String.valueOf(chatId), messageId)); } catch (Exception e) {}
@@ -2042,7 +2502,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 String[] parts = data.split(":");
                 int welderId = Integer.parseInt(parts[1]);
                 long targetUserId = Long.parseLong(parts[2]);
-                if (DatabaseManager.takeWelder(welderId, targetUserId, chatId)) {
+                if (DatabaseManager.takeWelder(welderId, targetUserId, Long.valueOf(chatId))) {
                     sendDirectNotification(targetUserId, "🔔 <b>Администратор выдал вам сварочный аппарат!</b>\nЗа вами закреплен: <b>" + DatabaseManager.getWelderNameById(welderId) + "</b>");
                     sendWeldersMenu(chatId, role, messageId, "Аппарат " + DatabaseManager.getWelderNameById(welderId) + " принудительно выдан.");
                 }
@@ -2080,101 +2540,6 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 return;
             }
 
-            // ==========================================
-            // НАЧАЛО: ЧИСТЫЙ БЛОК УПРАВЛЕНИЯ ИНСТРУМЕНТОМ
-            // ==========================================
-            if (data.equals("TOOL_MAIN_MENU") && "ADMIN".equals(role)) {
-                try { execute(new DeleteMessage(String.valueOf(chatId), messageId)); } catch (Exception e) {}
-                sendToolManagementMenu(chatId);
-                return;
-            }
-            if (data.equals("TOOL_MENU_AUDIT_ALL") && "ADMIN".equals(role)) {
-                sendMenu(chatId, role, DatabaseManager.getToolsAuditText());
-                return;
-            }
-            if (data.equals("TOOL_MENU_AUDIT_USERS") && "ADMIN".equals(role)) {
-                sendUsersToolSummaryMenu(chatId);
-                return;
-            }
-            if (data.equals("TOOL_MENU_AUDIT_NOTIFY") && "ADMIN".equals(role)) {
-                try { execute(new DeleteMessage(String.valueOf(chatId), messageId)); } catch (Exception e) {}
-                sendMenu(chatId, role, "⏳ Начинаю рассылку уведомлений...");
-                List<Long> workersWithMaterials = DatabaseManager.getUsersWithBalances();
-                int successCount = 0;
-                for (Long workerId : workersWithMaterials) {
-                    try {
-                        SendMessage msg = new SendMessage(String.valueOf(workerId), "⚠ <b>ВНИМАНИЕ: АУДИТ ОСТАТКОВ!</b> ⚠️\n\nНапоминаем о необходимости закрыть подотчет до конца месяца. Пожалуйста, <b>спишите</b> использованные материалы в квитанции или <b>верните</b> остатки на склад!\n\n" + DatabaseManager.getUserBalanceText(workerId));
-                        msg.setParseMode("HTML"); execute(msg); successCount++;
-                    } catch (TelegramApiException e) {}
-                }
-                sendMenu(chatId, role, "✅ Уведомления об аудите успешно доставлены <b>" + successCount + "</b> сотрудникам!");
-                sendToolManagementMenu(chatId);
-                return;
-            }
-            if (data.startsWith("T_SUMM_U:") && "ADMIN".equals(role)) { sendUserToolSummary(chatId, Long.parseLong(data.split(":")[1])); return; }
-            if (data.startsWith("T_SUMM_RET:") && "ADMIN".equals(role)) {
-                String[] parts = data.split(":");
-                DatabaseManager.returnToolToWarehouse(Integer.parseInt(parts[1]));
-                AnswerCallbackQuery answer = new AnswerCallbackQuery();
-                answer.setCallbackQueryId(update.getCallbackQuery().getId());
-                answer.setText("✅ Инструмент возвращен!"); answer.setShowAlert(false);
-                try { execute(answer); } catch (TelegramApiException e) {}
-                sendUserToolSummary(chatId, Long.parseLong(parts[2])); return;
-            }
-            if (data.startsWith("T_SUMM_RALL:") && "ADMIN".equals(role)) {
-                sendMenu(chatId, role, DatabaseManager.returnAllUserToolsToWarehouse(Long.parseLong(data.split(":")[1])));
-                sendUsersToolSummaryMenu(chatId); return;
-            }
-
-            // --- ВЫДАЧА ---
-            if (data.startsWith("T_SEL_N:") && "ADMIN".equals(role)) { sendUsersForToolAssignment(chatId, Integer.parseInt(data.split(":")[1]), messageId); return; }
-            if (data.startsWith("T_ASS_U:") && "ADMIN".equals(role)) {
-                try { execute(new DeleteMessage(String.valueOf(chatId), messageId)); } catch (Exception e) {}
-                String[] parts = data.split(":");
-                long targetUserId = Long.parseLong(parts[2]);
-                String result = DatabaseManager.assignTool(Integer.parseInt(parts[1]), targetUserId);
-                sendMenu(chatId, role, result);
-                sendToolManagementMenu(chatId);
-                if (result.startsWith("✅") && targetUserId != chatId) sendDirectNotification(targetUserId, "🔔 <b>Вам выдан новый инструмент!</b>\nМОЛ закрепил за вами новую позицию.");
-                return;
-            }
-
-            // --- ВОЗВРАТ ---
-            if (data.startsWith("T_RET_U:") && "ADMIN".equals(role)) { sendUserToolsForReturn(chatId, Long.parseLong(data.split(":")[1]), messageId); return; }
-            if (data.startsWith("T_RET_T:") && "ADMIN".equals(role)) {
-                try { execute(new DeleteMessage(String.valueOf(chatId), messageId)); } catch (Exception e) {}
-                sendMenu(chatId, role, DatabaseManager.returnToolToWarehouse(Integer.parseInt(data.split(":")[1])));
-                sendToolManagementMenu(chatId);
-                return;
-            }
-
-            // --- СПИСАНИЕ ---
-            if (data.startsWith("T_WO_LOC:") && "ADMIN".equals(role)) {
-                if (data.split(":")[1].equals("STOCK")) sendGroupsForToolWriteOff(chatId, messageId);
-                else sendUsersForToolWriteOff(chatId, messageId);
-                return;
-            }
-            if (data.startsWith("T_WO_U:") && "ADMIN".equals(role)) { sendUserToolsForWriteOff(chatId, Long.parseLong(data.split(":")[1]), messageId); return; }
-            if (data.startsWith("T_WO_G:") && "ADMIN".equals(role)) { sendSpecificToolsInStockForWriteOff(chatId, Integer.parseInt(data.split(":")[1]), messageId); return; }
-            if (data.startsWith("T_WO_DO:") && "ADMIN".equals(role)) {
-                try { execute(new DeleteMessage(String.valueOf(chatId), messageId)); } catch (Exception e) {}
-                int toolId = Integer.parseInt(data.split(":")[1]);
-                waitingToolWriteOffReason.put(chatId, toolId);
-                sendCancelKeyboard(chatId, "✍️ Выбран инструмент: <b>" + DatabaseManager.getToolNameAndInvById(toolId) + "</b>\n\nВведите <b>причину списания</b> (например: утерян, сломался):");
-                return;
-            }
-
-            // --- ВОССТАНОВЛЕНИЕ ИЗ АРХИВА ---
-            if (data.startsWith("T_RES_DO:") && "ADMIN".equals(role)) {
-                try { execute(new DeleteMessage(String.valueOf(chatId), messageId)); } catch (Exception e) {}
-                sendMenu(chatId, role, DatabaseManager.restoreToolToStock(Integer.parseInt(data.split(":")[1])));
-                sendToolManagementMenu(chatId);
-                return;
-            }
-            // ==========================================
-            // КОНЕЦ: ЧИСТЫЙ БЛОК УПРАВЛЕНИЯ ИНСТРУМЕНТОМ
-            // ==========================================
-
             if (data.startsWith("NEW_USER_APP:") && "ADMIN".equals(role)) {
                 long targetId = Long.parseLong(data.split(":")[1]);
                 DatabaseManager.setBanStatus(targetId, false);
@@ -2195,6 +2560,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
             if (data.startsWith("CART_SEL_SRV:")) {
                 int srvId = Integer.parseInt(data.split(":")[1]);
                 DatabaseManager.ReceiptSession s = receiptSessions.computeIfAbsent(chatId, k -> new DatabaseManager.ReceiptSession());
+                s.anchorMsgId = messageId;
                 DatabaseManager.ReceiptItem item = DatabaseManager.getServiceById(srvId);
                 if (item != null) {
                     if (item.isSingle) {
@@ -2202,7 +2568,12 @@ public class WarehouseBot extends TelegramLongPollingBot {
                         sendCartMenu(chatId, role, messageId);
                     } else {
                         s.waitingServiceId = srvId; s.waitingMaterialId = -1;
-                        sendCancelKeyboard(chatId, "✍ <b>Введите количество</b> для выбранной услуги (например: 1 или 2):");
+                        InlineKeyboardMarkup markup = new InlineKeyboardMarkup(List.of(List.of(createBtn("🔙 Назад в корзину", "CART_MENU"))));
+                        EditMessageText edit = new EditMessageText();
+                        edit.setChatId(String.valueOf(chatId)); edit.setMessageId(messageId);
+                        edit.setText("✍ <b>Введите количество</b> для выбранной услуги (например: 1 или 2):");
+                        edit.setParseMode("HTML"); edit.setReplyMarkup(markup);
+                        try { execute(edit); } catch (Exception e) {}
                     }
                 }
                 return;
@@ -2210,21 +2581,41 @@ public class WarehouseBot extends TelegramLongPollingBot {
             if (data.startsWith("CART_SEL_MAT:")) {
                 int matId = Integer.parseInt(data.split(":")[1]);
                 DatabaseManager.ReceiptSession s = receiptSessions.computeIfAbsent(chatId, k -> new DatabaseManager.ReceiptSession());
+                s.anchorMsgId = messageId;
                 s.waitingMaterialId = matId; s.waitingServiceId = -1;
-                sendCancelKeyboard(chatId, "✍️ <b>Введите количество</b> израсходованного материала (например: 15 или 0.02):");
+                InlineKeyboardMarkup markup = new InlineKeyboardMarkup(List.of(List.of(createBtn("🔙 Назад в корзину", "CART_MENU"))));
+                EditMessageText edit = new EditMessageText();
+                edit.setChatId(String.valueOf(chatId)); edit.setMessageId(messageId);
+                edit.setText("✍️ <b>Введите количество</b> израсходованного материала (например: 15 или 0.02):");
+                edit.setParseMode("HTML"); edit.setReplyMarkup(markup);
+                try { execute(edit); } catch (Exception e) {}
                 return;
             }
             if (data.equals("CART_FINISH")) {
                 DatabaseManager.ReceiptSession s = receiptSessions.get(chatId);
-                if (s == null || s.items.isEmpty()) sendMenu(chatId, role, "❌ Ваша квитанция пуста.");
-                else {
+                if (s == null || s.items.isEmpty()) {
+                    AnswerCallbackQuery ans = new AnswerCallbackQuery();
+                    ans.setCallbackQueryId(update.getCallbackQuery().getId());
+                    ans.setText("❌ Ваша квитанция пуста.");
+                    try { execute(ans); } catch (Exception e) {}
+                } else {
+                    InlineKeyboardMarkup markup = new InlineKeyboardMarkup(List.of(
+                            List.of(createBtn("❌ Закрыть", "GENERIC_CLOSE"))
+                    ));
                     EditMessageText edit = new EditMessageText();
-                    edit.setChatId(String.valueOf(chatId)); edit.setMessageId(messageId);
+                    edit.setChatId(String.valueOf(chatId));
+                    edit.setMessageId(messageId);
                     edit.setText(DatabaseManager.generateReceiptText(s));
                     edit.setParseMode("HTML");
+                    edit.setReplyMarkup(markup);
                     try { execute(edit); } catch (TelegramApiException e) {}
+
                     receiptSessions.remove(chatId);
-                    sendMenu(chatId, role, "✅ Квитанция успешно сформирована!");
+
+                    AnswerCallbackQuery ans = new AnswerCallbackQuery();
+                    ans.setCallbackQueryId(update.getCallbackQuery().getId());
+                    ans.setText("✅ Квитанция успешно сформирована!");
+                    try { execute(ans); } catch (Exception e) {}
                 }
                 return;
             }
@@ -2245,16 +2636,20 @@ public class WarehouseBot extends TelegramLongPollingBot {
             }
 
             if (data.startsWith("TAKE_MAT:")) {
-                writeOffSessions.remove(chatId);
+                writeOffCartSessions.remove(chatId);
                 waitingTakeMaterialId.put(chatId, Integer.parseInt(data.split(":")[1]));
-                sendCancelKeyboard(chatId, "Подготовка к выдаче...");
+
                 InlineKeyboardMarkup inlineMarkup = new InlineKeyboardMarkup(List.of(
                         List.of(createBtn("1", "TAKE_Q:1"), createBtn("2", "TAKE_Q:2"), createBtn("3", "TAKE_Q:3"), createBtn("4", "TAKE_Q:4"), createBtn("5", "TAKE_Q:5")),
-                        List.of(createBtn("10", "TAKE_Q:10"), createBtn("20", "TAKE_Q:20"), createBtn("50", "TAKE_Q:50"), createBtn("100", "TAKE_Q:100"))
+                        List.of(createBtn("10", "TAKE_Q:10"), createBtn("20", "TAKE_Q:20"), createBtn("50", "TAKE_Q:50"), createBtn("100", "TAKE_Q:100")),
+                        List.of(createBtn("❌ Отменить", "WH_CLOSE"))
                 ));
-                SendMessage msg = new SendMessage(String.valueOf(chatId), "✍ <b>Укажите количество:</b>\nНапишите число вручную (например: <code>15</code>) ИЛИ нажмите на кнопку:");
-                msg.setParseMode("HTML"); msg.setReplyMarkup(inlineMarkup);
-                try { execute(msg); } catch (TelegramApiException e) {} return;
+                EditMessageText edit = new EditMessageText();
+                edit.setChatId(String.valueOf(chatId)); edit.setMessageId(messageId);
+                edit.setText("✍ <b>Укажите количество:</b>\nНапишите число вручную (например: <code>15</code>) ИЛИ нажмите на кнопку:");
+                edit.setParseMode("HTML"); edit.setReplyMarkup(inlineMarkup);
+                try { execute(edit); } catch (Exception e) {}
+                return;
             }
 
             if (data.startsWith("TAKE_Q:")) {
@@ -2283,82 +2678,145 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 return;
             }
 
-            if (data.startsWith("WO_MAT:")) {
-                waitingTakeMaterialId.remove(chatId);
-                WriteOffSession session = DatabaseManager.createWriteOffSession(chatId, Integer.parseInt(data.split(":")[1]));
-                if (session == null) { sendMenu(chatId, role, "❌ Материал не числится в подотчете."); return; }
-                writeOffSessions.put(chatId, session);
-                sendCancelKeyboard(chatId, "Подготовка к списанию...");
-                InlineKeyboardMarkup inlineMarkup = new InlineKeyboardMarkup(List.of(
-                        List.of(createBtn("1", "WO_Q:1"), createBtn("2", "WO_Q:2"), createBtn("5", "WO_Q:5"), createBtn("10", "WO_Q:10")),
-                        List.of(createBtn("Всё (" + DatabaseManager.fmtQty(session.maxAvailable) + " " + session.unit + ")", "WO_Q:" + session.maxAvailable))
-                ));
-                SendMessage msg = new SendMessage(String.valueOf(chatId), String.format("Выбрано: <b>%s</b>\nДоступно у вас: <b>%s %s</b>\n\n✍️ Напишите количество вручную ИЛИ выберите быстрый вариант:", session.materialName, DatabaseManager.fmtQty(session.maxAvailable), session.unit));
-                msg.setParseMode("HTML"); msg.setReplyMarkup(inlineMarkup);
-                try { execute(msg); } catch (TelegramApiException e) {} return;
+            // --- НАЧАЛО НОВОЙ ЛОГИКИ КОРЗИНЫ СПИСАНИЯ ---
+            if (data.equals("WO_CLEAR_CART")) {
+                writeOffCartSessions.remove(chatId);
+                startWriteOffMenu(chatId, role, messageId, "🗑 Список материалов очищен.");
+                return;
             }
 
-            if (data.startsWith("WO_Q:") && writeOffSessions.containsKey(chatId)) {
-                WriteOffSession s = writeOffSessions.get(chatId);
+            if (data.equals("WO_CHECKOUT")) {
+                WriteOffCartSession cart = writeOffCartSessions.get(chatId);
+                if (cart == null || cart.items.isEmpty()) return;
+                cart.step = "WAIT_TYPE";
+                sendTypeButtons(chatId, cart, messageId);
+                return;
+            }
+
+            if (data.equals("WO_BACK_LIST")) {
+                WriteOffCartSession cart = writeOffCartSessions.get(chatId);
+                if (cart != null) {
+                    cart.tempItem = null;
+                    if (cart.items.isEmpty()) writeOffCartSessions.remove(chatId);
+                }
+                startWriteOffMenu(chatId, role, messageId, null);
+                return;
+            }
+
+            if (data.startsWith("WO_MAT:")) {
+                waitingTakeMaterialId.remove(chatId);
+                WriteOffSession temp = DatabaseManager.createWriteOffSession(chatId, Integer.parseInt(data.split(":")[1]));
+                if (temp == null) { startWriteOffMenu(chatId, role, messageId, null); return; }
+
+                WriteOffCartSession cart = writeOffCartSessions.computeIfAbsent(chatId, k -> new WriteOffCartSession());
+                cart.anchorMsgId = messageId;
+
+                // Вычитаем из доступного то, что уже добавлено в корзину
+                for (WriteOffSession item : cart.items) {
+                    if (item.materialId == temp.materialId) {
+                        temp.maxAvailable -= item.quantity;
+                    }
+                }
+
+                if (temp.maxAvailable <= 0) {
+                    startWriteOffMenu(chatId, role, messageId, "❌ Вы уже добавили весь доступный объем этого материала в список!");
+                    return;
+                }
+
+                cart.tempItem = temp;
+                cart.step = "WAIT_QTY";
+
+                InlineKeyboardMarkup inlineMarkup = new InlineKeyboardMarkup(List.of(
+                        List.of(createBtn("1", "WO_Q:1"), createBtn("2", "WO_Q:2"), createBtn("5", "WO_Q:5"), createBtn("10", "WO_Q:10")),
+                        List.of(createBtn("Всё (" + DatabaseManager.fmtQty(temp.maxAvailable) + " " + temp.unit + ")", "WO_Q:" + temp.maxAvailable)),
+                        List.of(createBtn("🔙 Назад к списку", "WO_BACK_LIST"), createBtn("❌ Отменить", "CANCEL_PROMPT"))
+                ));
+
+                String text = String.format("Выбрано: <b>%s</b>\nДоступно к добавлению: <b>%s %s</b>\n\n✍️ Напишите количество вручную ИЛИ выберите быстрый вариант:", temp.materialName, DatabaseManager.fmtQty(temp.maxAvailable), temp.unit);
+                EditMessageText edit = new EditMessageText();
+                edit.setChatId(String.valueOf(chatId)); edit.setMessageId(messageId);
+                edit.setText(text); edit.setParseMode("HTML"); edit.setReplyMarkup(inlineMarkup);
+                try { execute(edit); } catch (TelegramApiException e) {} return;
+            }
+
+            if (data.startsWith("WO_Q:") && writeOffCartSessions.containsKey(chatId)) {
+                WriteOffCartSession s = writeOffCartSessions.get(chatId);
+                if (s.tempItem == null) return;
                 try {
                     double qty = Double.parseDouble(data.split(":")[1]);
-                    if (qty <= 0 || qty > s.maxAvailable + 1e-9) { sendCancelKeyboard(chatId, String.format("❌ Ошибка: доступно не более %s %s.", DatabaseManager.fmtQty(s.maxAvailable), s.unit)); return; }
-                    s.quantity = qty; s.step = "WAIT_TYPE"; sendTypeButtons(chatId, s);
+                    if (qty <= 0 || qty > s.tempItem.maxAvailable + 1e-9) {
+                        AnswerCallbackQuery ans = new AnswerCallbackQuery();
+                        ans.setCallbackQueryId(update.getCallbackQuery().getId());
+                        ans.setText("❌ Доступно не более " + DatabaseManager.fmtQty(s.tempItem.maxAvailable) + " " + s.tempItem.unit);
+                        ans.setShowAlert(true);
+                        try { execute(ans); } catch (Exception e){}
+                        return;
+                    }
+                    s.tempItem.quantity = qty;
+                    s.items.add(s.tempItem);
+                    s.tempItem = null;
+                    startWriteOffMenu(chatId, role, messageId, "✅ Материал добавлен в список!");
                 } catch (Exception e) {} return;
             }
 
-            if (data.startsWith("WO_TYPE:") && writeOffSessions.containsKey(chatId)) {
-                WriteOffSession session = writeOffSessions.get(chatId);
+            if (data.startsWith("WO_TYPE:") && writeOffCartSessions.containsKey(chatId)) {
+                WriteOffCartSession cart = writeOffCartSessions.get(chatId);
                 String type = data.split(":")[1];
                 if ("RETURN".equals(type)) {
-                    DatabaseManager.ReturnRequestInfo req = DatabaseManager.createReturnRequest(chatId, session.materialId, session.quantity);
-
-                    // 👇 АТОМИЗИРУЕМ ПРОШЛЫЕ ШАГИ 👇
-                    clearChatHistory(chatId);
-
-                    if (req.success) {
-                        if ("ADMIN".equals(role)) {
-                            sendDirectNotification(chatId, "⚡️ <b>Автоматический возврат МОЛ:</b>\n\n" + DatabaseManager.approveReturnRequest(req.requestId)[2]);
+                    StringBuilder finalRes = new StringBuilder();
+                    for (WriteOffSession item : cart.items) {
+                        DatabaseManager.ReturnRequestInfo req = DatabaseManager.createReturnRequest(chatId, item.materialId, item.quantity);
+                        if (req.success) {
+                            if ("ADMIN".equals(role)) {
+                                finalRes.append("⚡️ <b>Возврат:</b> ").append(DatabaseManager.approveReturnRequest(req.requestId)[2]).append("\n");
+                            } else {
+                                finalRes.append(req.messageForWorker).append("\n");
+                                sendReturnApprovalToAdmins(req.requestId, req.messageForAdmin);
+                            }
                         } else {
-                            sendDirectNotification(chatId, req.messageForWorker);
-                            sendReturnApprovalToAdmins(req.requestId, req.messageForAdmin);
+                            finalRes.append(req.messageForWorker).append("\n");
                         }
-                    } else {
-                        sendDirectNotification(chatId, req.messageForWorker);
                     }
-                    writeOffSessions.remove(chatId);
-
-                    startWriteOffMenu(chatId, role); // Выводим новый список
+                    writeOffCartSessions.remove(chatId);
+                    startWriteOffMenu(chatId, role, messageId, finalRes.toString().trim());
                 } else if ("PAID".equals(type)) {
-                    session.isPaidReceipt = true; session.step = "WAIT_RECEIPT_NUM";
-                    sendCancelKeyboard(chatId, "🧾 <b>Списание по квитанции (шаг 1 из 4)</b>\nВведите <b>номер квитанции</b>:");
+                    cart.isPaidReceipt = true; cart.step = "WAIT_RECEIPT_NUM";
+                    updateWriteOffUI(chatId, messageId, "🧾 <b>Списание по квитанции (шаг 1 из 4)</b>\nВведите <b>номер квитанции</b>:");
                 } else {
-                    session.isPaidReceipt = false; session.step = "WAIT_FREE_PHONE";
-                    sendCancelKeyboard(chatId, "🛠 <b>Техническое списание (шаг 1 из 5)</b>\nВведите <b>номер телефона</b>, на который оформлена заявка:");
+                    cart.isPaidReceipt = false; cart.step = "WAIT_FREE_PHONE";
+                    updateWriteOffUI(chatId, messageId, "🛠 <b>Техническое списание (шаг 1 из 5)</b>\nВведите <b>номер телефона</b>, на который оформлена заявка:");
                 }
                 return;
             }
 
-            if (data.startsWith("WO_CODE:") && writeOffSessions.containsKey(chatId)) {
-                WriteOffSession session = writeOffSessions.remove(chatId);
-                session.closingCode = data.split(":")[1];
-                session.reason = switch (session.closingCode) {
+            if (data.startsWith("WO_CODE:") && writeOffCartSessions.containsKey(chatId)) {
+                WriteOffCartSession s = writeOffCartSessions.remove(chatId);
+                String closingCode = data.split(":")[1];
+                String reason = switch (closingCode) {
                     case "212" -> "Ремонт ВОК на участке ОРК-ОРА"; case "227" -> "Выправление волокна";
                     case "215" -> "В ОРШ: выправление пигтейла/волокна"; case "226" -> "В ОРШ: замена пигтейла / адаптера";
                     case "214" -> "Участок ОРШ-ОРК: ремонт/замена райзера"; case "217" -> "Участок ОРШ-ОРК: запасной модуль";
-                    default -> "Тех. списание (Код " + session.closingCode + ")";
+                    default -> "Тех. списание (Код " + closingCode + ")";
                 };
-                String res = DatabaseManager.completeWriteOff(chatId, session);
 
-                // 👇 АТОМИЗИРУЕМ ПРОШЛЫЕ ШАГИ 👇
-                clearChatHistory(chatId);
+                StringBuilder finalRes = new StringBuilder("🛠 <b>Результаты списания:</b>\n");
+                for (WriteOffSession item : s.items) {
+                    item.isPaidReceipt = false;
+                    item.phoneNumber = s.phoneNumber;
+                    item.contractNumber = s.contractNumber;
+                    item.address = s.address;
+                    item.closingCode = closingCode;
+                    item.reason = reason;
+                    finalRes.append(DatabaseManager.completeWriteOff(chatId, item)).append("\n");
+                }
 
-                sendDirectNotification(chatId, res);
-                if (!"ADMIN".equals(role)) notifyAdminsForAction(chatId, "🔔 <b>ВНИМАНИЕ! Списание материала:</b>\nМастер <b>" + firstName + "</b> только что выполнил техническое списание:\n\n" + res);
+                if (!"ADMIN".equals(role)) notifyAdminsForAction(chatId, "🔔 <b>ВНИМАНИЕ! Списание:</b>\nМастер <b>" + firstName + "</b> выполнил техническое списание:\n\n" + finalRes.toString());
 
-                startWriteOffMenu(chatId, role);
+                startWriteOffMenu(chatId, role, messageId, finalRes.toString().trim());
                 return;
             }
+            // --- КОНЕЦ НОВОЙ ЛОГИКИ КОРЗИНЫ СПИСАНИЯ ---
+
             return;
         }
 
@@ -2384,7 +2842,29 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 return;
             }
 
+            // Блокировка текстовых команд для принимающего
+            if (pendingWelderTransfers.containsKey(chatId)) {
+                SendMessage blockMsg = new SendMessage(String.valueOf(chatId), "⚠️ <b>ДОСТУП ЗАБЛОКИРОВАН!</b>\nКоллега передает вам сварочный аппарат.\n\n👇 Пожалуйста, найдите сообщение ниже с кнопками <b>«Принять»</b> / <b>«Отказаться»</b> и сделайте выбор.");
+                blockMsg.setParseMode("HTML"); try { execute(blockMsg); } catch (Exception e) {}
+                return;
+            }
+
             if (checkUnboundAndNotify(chatId, role)) return;
+
+            if (text.equals("🛠 Неисправности")) {
+                // Очищаем чат от мусора (сообщения пользователя)
+                try { execute(new DeleteMessage(String.valueOf(chatId), update.getMessage().getMessageId())); } catch (Exception e) {}
+
+                InlineKeyboardMarkup markup = new InlineKeyboardMarkup(List.of(
+                        List.of(createBtn("🌐 Модемы", "ERRORS_MODEMS"), createBtn("📺 Приставки", "ERRORS_STB")),
+                        List.of(createBtn("❌ Закрыть", "GENERIC_CLOSE"))
+                ));
+                SendMessage msg = new SendMessage(String.valueOf(chatId), "🛠 <b>Справочник неисправностей</b>\n\nВыберите тип оборудования, чтобы просмотреть частые проблемы:");
+                msg.setParseMode("HTML");
+                msg.setReplyMarkup(markup);
+                try { execute(msg); } catch (Exception e) {}
+                return;
+            }
 
             if (text.equals("❌ Отменить") || text.equals("🔙 Назад")) {
                 TmReportSession cancelledSession = tmReportSessions.remove(chatId);
@@ -2401,7 +2881,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
                         waitingScheduleEditDate.containsKey(chatId);
 
                 waitingNameFix.remove(chatId);
-                waitingTakeMaterialId.remove(chatId); writeOffSessions.remove(chatId); fileWaitState.remove(chatId);
+                waitingTakeMaterialId.remove(chatId); writeOffCartSessions.remove(chatId); fileWaitState.remove(chatId);
                 waitingToolWriteOffReason.remove(chatId); waitingOrshPhoto.remove(chatId); waitingOrshProblemReason.remove(chatId);
                 waitingDirContactCat.remove(chatId); waitingScheduleEditUser.remove(chatId); waitingScheduleEditDate.remove(chatId);
                 waitingNewEmployeeName.remove(chatId);
@@ -2428,7 +2908,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
             if (text.startsWith("📦") || text.startsWith("🧰") || text.startsWith("📝") || text.startsWith("📋") || text.startsWith("🔢") || text.startsWith("🤝") || text.startsWith("📊") || text.startsWith("📥") || text.startsWith("📑") || text.startsWith("🗓") || text.startsWith("🔍") || text.startsWith("📢") || text.startsWith("👥") || text.startsWith("🪛") || text.startsWith("🛠") || text.startsWith("📞") || text.startsWith("🔌") || text.startsWith("👁") || text.startsWith("✏️") || text.startsWith("🤒") || text.equals("/start")) {
                 clearChatHistory(chatId);
                 waitingNameFix.remove(chatId);
-                waitingTakeMaterialId.remove(chatId); waitingDirContactCat.remove(chatId); writeOffSessions.remove(chatId);
+                waitingTakeMaterialId.remove(chatId); waitingDirContactCat.remove(chatId); writeOffCartSessions.remove(chatId);
                 fileWaitState.remove(chatId); waitingToolWriteOffReason.remove(chatId); waitingOrshPhoto.remove(chatId);
                 waitingOrshProblemReason.remove(chatId); waitingScheduleEditUser.remove(chatId); waitingScheduleEditDate.remove(chatId);
                 waitingNewEmployeeName.remove(chatId);
@@ -2532,47 +3012,112 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 sendMenu(chatId, role, DatabaseManager.addNewEmployeeToSchedule(newName));
                 return;
             }
-            if (waitingScheduleEditUser.containsKey(chatId)) {
-                String targetUser = waitingScheduleEditUser.remove(chatId);
-                try {
-                    String input = text.trim();
-                    java.time.format.DateTimeFormatter dtf = java.time.format.DateTimeFormatter.ofPattern("dd.MM.yyyy");
-                    String savedDateRange;
-                    String displayDate;
 
-                    if (input.contains("-")) {
-                        String[] parts = input.split("-");
-                        java.time.LocalDate start = java.time.LocalDate.parse(parts[0].trim(), dtf);
-                        java.time.LocalDate end = java.time.LocalDate.parse(parts[1].trim(), dtf);
-                        if (start.isAfter(end)) throw new Exception("Ошибка: Начальная дата больше конечной");
-                        savedDateRange = start.format(dtf) + "-" + end.format(dtf);
-                        displayDate = "с " + start.format(dtf) + " по " + end.format(dtf);
-                    } else {
-                        java.time.LocalDate date = java.time.LocalDate.parse(input, dtf);
-                        savedDateRange = date.format(dtf);
-                        displayDate = date.format(dtf);
+            if (waitingScheduleEditUser.containsKey(chatId)) {
+                String savedState = waitingScheduleEditUser.remove(chatId);
+                String[] stateParts = savedState.split(":");
+                String targetUser = stateParts[0];
+                Integer anchorId = stateParts.length > 1 ? Integer.parseInt(stateParts[1]) : null;
+
+                String input = text.trim();
+                java.time.format.DateTimeFormatter dtfFull = java.time.format.DateTimeFormatter.ofPattern("dd.MM.yyyy");
+
+                int currentYear = java.time.LocalDate.now().getYear();
+                int currentMonth = java.time.LocalDate.now().getMonthValue();
+
+                List<java.time.LocalDate> targetDates = new ArrayList<>();
+                String displayDate = "";
+
+                try {
+                    // Разбиваем строку по запятым, чтобы получить отдельные элементы (даты или диапазоны)
+                    String[] items = input.split(",");
+
+                    for (String item : items) {
+                        item = item.trim();
+                        if (item.isEmpty()) continue;
+
+                        if (item.contains("-")) {
+                            // Это диапазон
+                            String[] parts = item.split("-");
+                            java.time.LocalDate start = parseSmartDate(parts[0].trim(), currentYear, currentMonth);
+                            java.time.LocalDate end = parseSmartDate(parts[1].trim(), currentYear, currentMonth);
+
+                            if (start.isAfter(end)) {
+                                if (start.getMonthValue() == 12 && end.getMonthValue() == 1) {
+                                    end = end.plusYears(1); // Легитимный переход через Новый год
+                                } else {
+                                    throw new Exception("Начальная дата больше конечной"); // Опечатка
+                                }
+                            }
+
+                            java.time.LocalDate current = start;
+                            while (!current.isAfter(end)) {
+                                if (!targetDates.contains(current)) targetDates.add(current);
+                                current = current.plusDays(1);
+                            }
+                        } else {
+                            // Это одиночная дата
+                            java.time.LocalDate date = parseSmartDate(item, currentYear, currentMonth);
+                            if (!targetDates.contains(date)) targetDates.add(date);
+                        }
                     }
 
-                    waitingScheduleEditDate.put(chatId, targetUser + ":" + savedDateRange);
+                    if (targetDates.isEmpty()) throw new Exception("Не найдено ни одной даты");
 
-                    InlineKeyboardMarkup markup = new InlineKeyboardMarkup(List.of(
-                            List.of(createBtn("В (Выходной)", "ED_SCH_S:В"), createBtn("О (Отпуск)", "ED_SCH_S:О"), createBtn("Д (Дежурство)", "ED_SCH_S:Д")),
-                            List.of(createBtn("Б (Больничный)", "ED_SCH_S:Б"), createBtn("А (За свой счет)", "ED_SCH_S:А"), createBtn("Г (Военкомат)", "ED_SCH_S:Г")),
-                            List.of(createBtn("П (Другое подразделение)", "ED_SCH_S:П")),
-                            List.of(createBtn("08:30 - 17:30", "ED_SCH_S:08:30-17:30"), createBtn("12:00 - 21:00", "ED_SCH_S:12:00-21:00"))
-                    ));
-                    SendMessage msg = new SendMessage(String.valueOf(chatId), "⚙️ Устанавливаем смену на <b>" + displayDate + "</b> для <b>" + targetUser + "</b>.\n\nВыберите тип смены из кнопок:");
-                    msg.setParseMode("HTML"); msg.setReplyMarkup(markup);
-                    execute(msg);
+                    // Сортируем даты по порядку
+                    java.util.Collections.sort(targetDates);
+
+                    if (targetDates.size() == 1) {
+                        displayDate = targetDates.get(0).format(dtfFull);
+                    } else {
+                        displayDate = "выбранные дни (" + targetDates.size() + " шт.)";
+                    }
+
                 } catch (Exception e) {
-                    sendCancelKeyboard(chatId, "❌ Неверный формат даты.\nПример правильного ввода: <code>15.11.2026</code> ИЛИ <code>01.11.2026-07.11.2026</code>");
-                    waitingScheduleEditUser.put(chatId, targetUser);
+                    waitingScheduleEditUser.put(chatId, savedState);
+                    if (anchorId != null) {
+                        EditMessageText edit = new EditMessageText();
+                        edit.setChatId(String.valueOf(chatId)); edit.setMessageId(anchorId);
+                        edit.setText("❌ <b>Не удалось распознать дату.</b>\n\nВы можете писать в любых форматах (с годом и без):\n• Одиночно: <code>15.11</code> или <code>15.11.26</code> или <code>15.11.2026</code>\n• Диапазон: <code>01.11-07.11</code> или <code>01.11.26-07.11.2026</code>\n• Комбинировано: <code>10.11, 15.11-18.11, 20.11.26</code>\n\nВведите даты еще раз:");
+                        edit.setParseMode("HTML");
+                        edit.setReplyMarkup(new InlineKeyboardMarkup(List.of(List.of(createBtn("❌ Отменить", "CANCEL_PROMPT")))));
+                        try { execute(edit); } catch (Exception ignored) {}
+                    }
+                    return;
+                }
+
+                // Формируем строку дат для передачи в кнопку
+                StringBuilder sbDates = new StringBuilder();
+                for (java.time.LocalDate d : targetDates) {
+                    sbDates.append(d.format(dtfFull)).append(",");
+                }
+                String datesString = sbDates.toString();
+                if (datesString.endsWith(",")) datesString = datesString.substring(0, datesString.length() - 1);
+
+                waitingScheduleEditDate.put(chatId, targetUser + ":" + datesString + (anchorId != null ? ":" + anchorId : ""));
+
+                InlineKeyboardMarkup markup = new InlineKeyboardMarkup(List.of(
+                        List.of(createBtn("В (Выходной)", "ED_SCH_S:В"), createBtn("О (Отпуск)", "ED_SCH_S:О"), createBtn("Д (Дежурство)", "ED_SCH_S:Д")),
+                        List.of(createBtn("Б (Больничный)", "ED_SCH_S:Б"), createBtn("А (За свой счет)", "ED_SCH_S:А"), createBtn("Г (Военкомат)", "ED_SCH_S:Г")),
+                        List.of(createBtn("П (Другое подразделение)", "ED_SCH_S:П")),
+                        List.of(createBtn("08:30 - 17:30", "ED_SCH_S:08:30-17:30"), createBtn("12:00 - 21:00", "ED_SCH_S:12:00-21:00")),
+                        List.of(createBtn("08:00 - 16:00 (Суббота)", "ED_SCH_S:08:00-16:00")),
+                        List.of(createBtn("❌ Отменить", "CANCEL_PROMPT"))
+                ));
+
+                String msgText = "⚙️ Устанавливаем смену на <b>" + displayDate + "</b> для <b>" + targetUser + "</b>.\n\nВыберите тип смены из кнопок:";
+
+                if (anchorId != null) {
+                    EditMessageText edit = new EditMessageText();
+                    edit.setChatId(String.valueOf(chatId)); edit.setMessageId(anchorId);
+                    edit.setText(msgText); edit.setParseMode("HTML"); edit.setReplyMarkup(markup);
+                    try { execute(edit); } catch (Exception e) {}
                 }
                 return;
             }
 
             if (waitingSickLeaveDate.containsKey(chatId)) {
-                waitingSickLeaveDate.remove(chatId);
+                Integer anchorId = waitingSickLeaveDate.remove(chatId);
                 String excelName = DatabaseManager.getUserExcelName(chatId);
                 if (excelName == null) {
                     sendMenu(chatId, role, "❌ Ошибка: вы не привязаны к графику.");
@@ -2581,41 +3126,68 @@ public class WarehouseBot extends TelegramLongPollingBot {
 
                 try {
                     String input = text.trim();
-                    java.time.format.DateTimeFormatter dtf = java.time.format.DateTimeFormatter.ofPattern("dd.MM.yyyy");
-                    java.time.LocalDate startDate;
-                    java.time.LocalDate endDate;
-                    String displayDate;
+                    java.time.format.DateTimeFormatter dtfFull = java.time.format.DateTimeFormatter.ofPattern("dd.MM.yyyy");
 
-                    if (input.contains("-")) {
-                        String[] parts = input.split("-");
-                        startDate = java.time.LocalDate.parse(parts[0].trim(), dtf);
-                        endDate = java.time.LocalDate.parse(parts[1].trim(), dtf);
-                        if (startDate.isAfter(endDate)) throw new Exception("Начальная дата больше конечной");
-                        displayDate = "с " + startDate.format(dtf) + " по " + endDate.format(dtf);
-                    } else {
-                        startDate = java.time.LocalDate.parse(input, dtf);
-                        endDate = startDate;
-                        displayDate = startDate.format(dtf);
+                    int currentYear = java.time.LocalDate.now().getYear();
+                    int currentMonth = java.time.LocalDate.now().getMonthValue();
+
+                    List<java.time.LocalDate> parsedDates = new ArrayList<>();
+
+                    // Используем умный парсинг для любых форматов
+                    String[] items = input.split(",");
+                    for (String item : items) {
+                        item = item.trim();
+                        if (item.isEmpty()) continue;
+
+                        if (item.contains("-")) {
+                            String[] parts = item.split("-");
+                            java.time.LocalDate start = parseSmartDate(parts[0].trim(), currentYear, currentMonth);
+                            java.time.LocalDate end = parseSmartDate(parts[1].trim(), currentYear, currentMonth);
+                            if (start.isAfter(end)) end = end.plusYears(1);
+
+                            java.time.LocalDate current = start;
+                            while (!current.isAfter(end)) {
+                                parsedDates.add(current);
+                                current = current.plusDays(1);
+                            }
+                        } else {
+                            parsedDates.add(parseSmartDate(item, currentYear, currentMonth));
+                        }
                     }
 
-                    long days = java.time.temporal.ChronoUnit.DAYS.between(startDate, endDate) + 1;
+                    if (parsedDates.isEmpty()) throw new Exception("Даты не найдены");
 
-                    if (days <= 7) {
-                        java.time.LocalDate current = startDate;
-                        while (!current.isAfter(endDate)) {
+                    // Больничный - это всегда непрерывный период. Находим начало и конец:
+                    java.time.LocalDate minDate = java.util.Collections.min(parsedDates);
+                    java.time.LocalDate maxDate = java.util.Collections.max(parsedDates);
+
+                    long days = java.time.temporal.ChronoUnit.DAYS.between(minDate, maxDate) + 1;
+                    String displayDate = (days == 1) ? minDate.format(dtfFull) : "с " + minDate.format(dtfFull) + " по " + maxDate.format(dtfFull);
+
+                    // --- ИЗМЕНЕНИЕ: ЛИМИТ 10 ДНЕЙ ---
+                    if (days <= 10) {
+                        java.time.LocalDate current = minDate;
+                        while (!current.isAfter(maxDate)) {
                             DatabaseManager.updateSingleShift(excelName, current.getYear(), current.getMonthValue(), current.getDayOfMonth(), "Б", "", "");
                             current = current.plusDays(1);
                         }
 
-                        sendScheduleMenu(chatId, role, "✅ Ваш больничный (" + displayDate + ") успешно зафиксирован! Выздоравливайте! 💊\n\n<i>Руководитель уведомлен, график обновлен.</i>", null);                        String adminMsg = "🚨 <b>ВНИМАНИЕ: Больничный!</b>\nСотрудник <b>" + excelName + "</b> сообщил о болезни.\nПериод: <b>" + displayDate + "</b>\n<i>Его график автоматически обновлен (статус \"Б\").</i>";
+                        // Рисуем SPA ответ для сотрудника
+                        sendScheduleMenu(chatId, role, "✅ Ваш больничный (" + displayDate + ") успешно зафиксирован! Выздоравливайте! 💊\n\n<i>Руководитель уведомлен, график обновлен.</i>", anchorId);
+
+                        String adminMsg = "🚨 <b>ВНИМАНИЕ: Больничный!</b>\nСотрудник <b>" + excelName + "</b> сообщил о болезни.\nПериод: <b>" + displayDate + "</b>\n<i>Его график автоматически обновлен (статус \"Б\").</i>";
+                        // 1. Уведомляем админа
                         for (Long adminId : DatabaseManager.getAdminIds()) sendDirectNotification(adminId, adminMsg);
+                        // 2. Уведомляем Козлова и Белевича (автоматически)
+                        notifyManagersAboutSickLeave(adminMsg);
 
                     } else {
-                        long requestId = DatabaseManager.createSickLeaveRequest(chatId, excelName, startDate.format(dtf), endDate.format(dtf));
-                        sendScheduleMenu(chatId, role, "⏳ Больничный (" + displayDate + ", " + days + " дн.) превышает 7 дней и требует подтверждения руководителя.\n\nВы получите уведомление, как только его согласуют.", null);
-                        String adminMsg = "🚨 <b>Запрос на больничный свыше недели</b>\nСотрудник: <b>" + excelName + "</b>\nПериод: <b>" + displayDate + "</b> (" + days + " дн.)\n\nПодтвердить изменение графика?";
-                        InlineKeyboardMarkup approvalMarkup = new InlineKeyboardMarkup();
-                        approvalMarkup.setKeyboard(List.of(List.of(
+                        // Больше 10 дней - требует подтверждения (уведомляем ТОЛЬКО АДМИНА)
+                        long requestId = DatabaseManager.createSickLeaveRequest(chatId, excelName, minDate.format(dtfFull), maxDate.format(dtfFull));
+                        sendScheduleMenu(chatId, role, "⏳ Больничный (" + displayDate + ", " + days + " дн.) превышает 10 дней и требует подтверждения руководителя.\n\nВы получите уведомление, как только его согласуют.", anchorId);
+
+                        String adminMsg = "🚨 <b>Запрос на больничный свыше 10 дней</b>\nСотрудник: <b>" + excelName + "</b>\nПериод: <b>" + displayDate + "</b> (" + days + " дн.)\n\nПодтвердить изменение графика?";
+                        InlineKeyboardMarkup approvalMarkup = new InlineKeyboardMarkup(List.of(List.of(
                                 createBtn("✅ Подтвердить", "SL_APPROVE:" + requestId),
                                 createBtn("❌ Отклонить", "SL_REJECT:" + requestId)
                         )));
@@ -2627,8 +3199,15 @@ public class WarehouseBot extends TelegramLongPollingBot {
                     }
 
                 } catch (Exception e) {
-                    sendCancelKeyboard(chatId, "❌ Неверный формат даты.\nПример правильного ввода: <code>15.10.2026</code> ИЛИ <code>15.10.2026-22.10.2026</code>");
-                    waitingSickLeaveDate.put(chatId, true);
+                    waitingSickLeaveDate.put(chatId, anchorId); // Возвращаем в режим ожидания
+                    if (anchorId != null) {
+                        EditMessageText edit = new EditMessageText();
+                        edit.setChatId(String.valueOf(chatId)); edit.setMessageId(anchorId);
+                        edit.setText("❌ <b>Не удалось распознать дату.</b>\n\nПожалуйста, используйте форматы:\n• Одиночно: <code>15.11</code>\n• Диапазоны: <code>15.10-22.10</code>\n\nВведите даты еще раз:");
+                        edit.setParseMode("HTML");
+                        edit.setReplyMarkup(new InlineKeyboardMarkup(List.of(List.of(createBtn("❌ Отменить", "CANCEL_PROMPT")))));
+                        try { execute(edit); } catch (Exception ignored) {}
+                    }
                 }
                 return;
             }
@@ -2697,11 +3276,12 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 return;
             }
             if (waitingToolWriteOffReason.containsKey(chatId)) {
-                sendMenu(chatId, role, DatabaseManager.writeOffTool(waitingToolWriteOffReason.remove(chatId), text));
-                sendToolManagementMenu(chatId);
+                String res = DatabaseManager.writeOffTool(waitingToolWriteOffReason.remove(chatId), text);
+                clearChatHistory(chatId); // Удаляет и сообщение юзера, и окно вопроса
+                sendToolManagementMenu(chatId, res); // Заново шлет меню с уведомлением сверху!
                 return;
             }
-            if (writeOffSessions.containsKey(chatId)) { handleWriteOffStep(chatId, firstName, role, text); return; }
+            if (writeOffCartSessions.containsKey(chatId)) { handleWriteOffStep(chatId, firstName, role, text); return; }
 
             DatabaseManager.ReceiptSession cartSession = receiptSessions.get(chatId);
             if (cartSession != null && (cartSession.waitingServiceId != -1 || cartSession.waitingMaterialId != -1)) {
@@ -2717,8 +3297,15 @@ public class WarehouseBot extends TelegramLongPollingBot {
                         if (item != null) { item.quantity = qty; cartSession.items.add(item); }
                         cartSession.waitingMaterialId = -1;
                     }
-                    sendCartMenu(chatId, role, null);
-                } catch (NumberFormatException e) { sendCancelKeyboard(chatId, "❌ Введите корректное число больше нуля:"); }
+                    sendCartMenu(chatId, role, cartSession.anchorMsgId); // Возвращаемся в текущую карточку
+                } catch (NumberFormatException e) {
+                    InlineKeyboardMarkup markup = new InlineKeyboardMarkup(List.of(List.of(createBtn("🔙 Назад в корзину", "CART_MENU"))));
+                    EditMessageText edit = new EditMessageText();
+                    edit.setChatId(String.valueOf(chatId)); edit.setMessageId(cartSession.anchorMsgId);
+                    edit.setText("❌ Введите корректное число больше нуля:");
+                    edit.setParseMode("HTML"); edit.setReplyMarkup(markup);
+                    try { execute(edit); } catch (Exception ex) {}
+                }
                 return;
             }
 
@@ -2796,7 +3383,8 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 case "/fix" -> {
                     if ("ADMIN".equals(role)) {
                         try (java.sql.Connection conn = DatabaseManager.getConnection(); java.sql.Statement stmt = conn.createStatement()) {
-                            stmt.execute("DELETE FROM return_requests"); sendMenu(chatId, role, "✅ Зависшие заявки очищены!");
+                            stmt.execute("DELETE FROM return_requests WHERE status = 'PENDING'");
+                            sendMenu(chatId, role, "✅ Зависшие заявки очищены!");
                         } catch (Exception e) { e.printStackTrace(); }
                     }
                 }
@@ -2918,7 +3506,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
         for (String s : dyn.getOrDefault(6, new ArrayList<>())) sb.append("▪️ ").append(s).append("\n");
         sb.append("\n📺 <b>Привязка СМЛ приставок</b>\n▪️ Дневное время (Ольга): +375(29) 788-84-98\n▪️ Вечернее время: +375(17) 334-56-24, +375(17) 328-46-56, +375(17) 252-44-55, +375(17) 359-41-10\n");
         for (String s : dyn.getOrDefault(7, new ArrayList<>())) sb.append("▪️ ").append(s).append("\n");
-        sb.append("\n🎧 <b>Диспетчера и админы (закрытие заявок)</b>\n▪ Диспетчеры ЦАБР: +375(17) 288-47-10\n▪ Инженер ЦАБР: +375(17) 268-46-26\n▪ Админы: +375(17) 306-29-56, +375(33) 603-38-81\n▪ После 20:00: +375(17) 306-29-59\n▪ VPN: +375(17) 203-66-86\n");
+        sb.append("\n🎧 <b>Диспетчера и админы (закрытие заявок)</b>\n▪ Диспетчеры ЦАБР: +375(17) 274-30-10\n▪ Инженер ЦАБР: +375(17) 274-28-16\n▪ Админы: +375(17) 306-29-56, +375(33) 603-38-81\n▪ После 20:00: +375(17) 306-29-59\n▪ VPN: +375(17) 203-66-86\n");
         for (String s : dyn.getOrDefault(8, new ArrayList<>())) sb.append("▪️ ").append(s).append("\n");
         sb.append("\n📹 <b>Прочее</b>\n▪ Видеоконтроль (Андрей): +375(17) 359-40-30\n▪️ РСМОБ: +375(17) 357-96-30\n");
         for (String s : dyn.getOrDefault(9, new ArrayList<>())) sb.append("▪️ ").append(s).append("\n");
@@ -2991,45 +3579,65 @@ public class WarehouseBot extends TelegramLongPollingBot {
     }
 
     private void handleWriteOffStep(long chatId, String firstName, String role, String text) {
-        WriteOffSession s = writeOffSessions.get(chatId);
+        WriteOffCartSession s = writeOffCartSessions.get(chatId);
+        if (s == null || s.anchorMsgId == null) {
+            sendCancelKeyboard(chatId, "❌ Ошибка сессии. Начните заново.");
+            writeOffCartSessions.remove(chatId);
+            return;
+        }
+
         switch (s.step) {
             case "WAIT_QTY" -> {
                 try {
                     double qty = Double.parseDouble(text.trim().replace(",", "."));
-                    if (qty <= 0 || qty > s.maxAvailable + 1e-9) { sendCancelKeyboard(chatId, "❌ Недопустимое количество."); return; }
-                    s.quantity = qty; s.step = "WAIT_TYPE"; sendTypeButtons(chatId, s);
-                } catch (Exception e) { sendCancelKeyboard(chatId, "❌ Введите количество числом."); }
+                    if (qty <= 0 || qty > s.tempItem.maxAvailable + 1e-9) {
+                        updateWriteOffUI(chatId, s.anchorMsgId, "❌ Максимум: " + DatabaseManager.fmtQty(s.tempItem.maxAvailable) + "\n\nВведите заново:");
+                        return;
+                    }
+                    s.tempItem.quantity = qty;
+                    s.items.add(s.tempItem);
+                    s.tempItem = null;
+                    startWriteOffMenu(chatId, role, s.anchorMsgId, "✅ Материал добавлен в список!");
+                } catch (Exception e) { updateWriteOffUI(chatId, s.anchorMsgId, "❌ Введите количество числом:"); }
             }
-            case "WAIT_RECEIPT_NUM" -> { s.receiptNumber = text.trim(); s.step = "WAIT_PAID_PHONE"; sendCancelKeyboard(chatId, "🧾 Введите <b>номер телефона</b>:"); }
-            case "WAIT_PAID_PHONE" -> { s.phoneNumber = text.trim(); s.step = "WAIT_PAID_CONTRACT"; sendCancelKeyboard(chatId, "🧾 Введите <b>номер договора</b>:"); }
-            case "WAIT_PAID_CONTRACT" -> { s.contractNumber = text.trim(); s.step = "WAIT_PAID_ADDRESS"; sendCancelKeyboard(chatId, "🧾 Введите <b>адрес абонента</b>:"); }
+            case "WAIT_RECEIPT_NUM" -> { s.receiptNumber = text.trim(); s.step = "WAIT_PAID_PHONE"; updateWriteOffUI(chatId, s.anchorMsgId, "🧾 Введите <b>номер телефона</b>:"); }
+            case "WAIT_PAID_PHONE" -> { s.phoneNumber = text.trim(); s.step = "WAIT_PAID_CONTRACT"; updateWriteOffUI(chatId, s.anchorMsgId, "🧾 Введите <b>номер договора</b> (или -):"); }
+            case "WAIT_PAID_CONTRACT" -> { s.contractNumber = text.trim(); s.step = "WAIT_PAID_ADDRESS"; updateWriteOffUI(chatId, s.anchorMsgId, "🧾 Введите <b>адрес абонента</b>:"); }
             case "WAIT_PAID_ADDRESS" -> {
-                s.address = text.trim(); writeOffSessions.remove(chatId);
-                String res = DatabaseManager.completeWriteOff(chatId, s);
-
-                // 👇 АТОМИЗИРУЕМ ПРОШЛЫЕ ШАГИ 👇
-                clearChatHistory(chatId);
-
-                sendDirectNotification(chatId, res);
-                if (!"ADMIN".equals(role)) notifyAdminsForAction(chatId, "🧾 <b>ВНИМАНИЕ! Выбита квитанция:</b>\n" + res);
-
-                startWriteOffMenu(chatId, role);
+                s.address = text.trim();
+                StringBuilder finalRes = new StringBuilder("🧾 <b>Результаты списания:</b>\n");
+                for (WriteOffSession item : s.items) {
+                    item.isPaidReceipt = true;
+                    item.receiptNumber = s.receiptNumber;
+                    item.phoneNumber = s.phoneNumber;
+                    item.contractNumber = s.contractNumber;
+                    item.address = s.address;
+                    item.closingCode = "102";
+                    item.reason = "Списание по квитанции";
+                    finalRes.append(DatabaseManager.completeWriteOff(chatId, item)).append("\n");
+                }
+                writeOffCartSessions.remove(chatId);
+                if (!"ADMIN".equals(role)) notifyAdminsForAction(chatId, "🧾 <b>ВНИМАНИЕ! Выбита квитанция:</b>\n" + finalRes.toString());
+                startWriteOffMenu(chatId, role, s.anchorMsgId, finalRes.toString().trim());
             }
-            case "WAIT_FREE_PHONE" -> { s.phoneNumber = text.trim(); s.step = "WAIT_FREE_CONTRACT"; sendCancelKeyboard(chatId, "🛠 Введите <b>номер договора</b> (или -):"); }
-            case "WAIT_FREE_CONTRACT" -> { s.contractNumber = text.trim(); s.step = "WAIT_FREE_ADDRESS"; sendCancelKeyboard(chatId, "🛠 Введите <b>адрес</b>:"); }
-            case "WAIT_FREE_ADDRESS" -> { s.address = text.trim(); s.step = "WAIT_CLOSING_CODE"; sendClosingCodeButtons(chatId, s.phoneNumber, s.contractNumber); }
+            case "WAIT_FREE_PHONE" -> { s.phoneNumber = text.trim(); s.step = "WAIT_FREE_CONTRACT"; updateWriteOffUI(chatId, s.anchorMsgId, "🛠 Введите <b>номер договора</b> (или -):"); }
+            case "WAIT_FREE_CONTRACT" -> { s.contractNumber = text.trim(); s.step = "WAIT_FREE_ADDRESS"; updateWriteOffUI(chatId, s.anchorMsgId, "🛠 Введите <b>адрес</b>:"); }
+            case "WAIT_FREE_ADDRESS" -> { s.address = text.trim(); s.step = "WAIT_CLOSING_CODE"; sendClosingCodeButtons(chatId, s.phoneNumber, s.contractNumber, s.anchorMsgId); }
         }
     }
 
-    private void sendTypeButtons(long chatId, WriteOffSession s) {
+    private void sendTypeButtons(long chatId, WriteOffCartSession s, int messageId) {
         InlineKeyboardMarkup markup = new InlineKeyboardMarkup(List.of(
                 List.of(createBtn("🧾 Списать по квитанции", "WO_TYPE:PAID")),
                 List.of(createBtn("🛠 Техническое списание", "WO_TYPE:FREE")),
-                List.of(createBtn("↩️ Вернуть на склад", "WO_TYPE:RETURN"))
+                List.of(createBtn("↩️ Вернуть на склад", "WO_TYPE:RETURN")),
+                List.of(createBtn("🔙 Назад к списку", "WO_BACK_LIST"), createBtn("❌ Отменить", "CANCEL_PROMPT"))
         ));
-        SendMessage msg = new SendMessage(String.valueOf(chatId), String.format("Количество: <b>%s %s</b>.\nЧто делаем с материалом?", DatabaseManager.fmtQty(s.quantity), s.unit));
-        msg.setParseMode("HTML"); msg.setReplyMarkup(markup);
-        try { execute(msg); } catch (TelegramApiException e) {}
+        String text = String.format("Выбрано позиций: <b>%d</b>.\nЧто делаем с этими материалами?", s.items.size());
+        EditMessageText edit = new EditMessageText();
+        edit.setChatId(String.valueOf(chatId)); edit.setMessageId(messageId);
+        edit.setText(text); edit.setParseMode("HTML"); edit.setReplyMarkup(markup);
+        try { execute(edit); } catch (Exception e) {}
     }
 
     private void sendReturnApprovalToAdmins(int requestId, String text) {
@@ -3047,18 +3655,81 @@ public class WarehouseBot extends TelegramLongPollingBot {
     }
 
     private void startWriteOffMenu(long chatId, String role) {
-        List<String[]> userMats = DatabaseManager.getUserMaterialsForWriteOff(chatId);
-        if (userMats.isEmpty()) { sendClosableMessage(chatId, "🧰 У вас на руках нет материалов."); return; }
-        InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
-        List<List<InlineKeyboardButton>> rows = new ArrayList<>();
-        for (String[] m : userMats) rows.add(List.of(createBtn(String.format("👉 %s [%s] (%s %s)", m[2].length() > 30 ? m[2].substring(0, 30) + "…" : m[2], m[1], m[4], m[3]), "WO_MAT:" + m[0])));
-        rows.add(List.of(createBtn("❌ Закрыть", "GENERIC_CLOSE")));
-        markup.setKeyboard(rows);
-        SendMessage msg = new SendMessage(String.valueOf(chatId), "📝 <b>Выберите материал из вашего подотчета:</b>");
-        msg.setParseMode("HTML"); msg.setReplyMarkup(markup); try { execute(msg); } catch (TelegramApiException e) {}
+        startWriteOffMenu(chatId, role, null, null);
     }
 
-    private void sendClosingCodeButtons(long chatId, String phone, String contract) {
+    private void startWriteOffMenu(long chatId, String role, Integer messageId) {
+        startWriteOffMenu(chatId, role, messageId, null);
+    }
+
+    private void startWriteOffMenu(long chatId, String role, Integer messageId, String alertText) {
+        List<String[]> userMats = DatabaseManager.getUserMaterialsForWriteOff(chatId);
+        WriteOffCartSession cart = writeOffCartSessions.get(chatId);
+
+        StringBuilder sb = new StringBuilder();
+        if (alertText != null && !alertText.isEmpty()) {
+            sb.append(alertText).append("\n\n➖➖➖➖➖➖➖➖➖➖\n");
+        }
+
+        boolean hasCart = (cart != null && !cart.items.isEmpty());
+        if (hasCart) {
+            sb.append("🛒 <b>К списанию/возврату:</b>\n");
+            for (int i = 0; i < cart.items.size(); i++) {
+                WriteOffSession item = cart.items.get(i);
+                sb.append(i + 1).append(". ").append(item.materialName).append(" — ")
+                        .append(DatabaseManager.fmtQty(item.quantity)).append(" ").append(item.unit).append("\n");
+            }
+            sb.append("\n");
+        }
+
+        if (userMats.isEmpty()) {
+            if (!hasCart) sb.append("🧰 У вас на руках нет материалов.");
+        } else {
+            sb.append("📝 <b>Выберите материал для добавления в список:</b>");
+        }
+
+        InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
+        List<List<InlineKeyboardButton>> rows = new ArrayList<>();
+
+        // Если в корзине есть товары, показываем кнопки оформления
+        if (hasCart) {
+            rows.add(List.of(createBtn("✅ ПЕРЕЙТИ К ОФОРМЛЕНИЮ", "WO_CHECKOUT")));
+            rows.add(List.of(createBtn("🗑 Очистить список", "WO_CLEAR_CART")));
+        }
+
+        for (String[] m : userMats) {
+            rows.add(List.of(createBtn(String.format("👉 %s [%s] (%s %s)",
+                    m[2].length() > 30 ? m[2].substring(0, 30) + "…" : m[2], m[1], m[4], m[3]), "WO_MAT:" + m[0])));
+        }
+        rows.add(List.of(createBtn("❌ Закрыть", "GENERIC_CLOSE")));
+        markup.setKeyboard(rows);
+
+        try {
+            if (messageId == null) {
+                SendMessage msg = new SendMessage(String.valueOf(chatId), sb.toString());
+                msg.setParseMode("HTML"); msg.setReplyMarkup(markup);
+                execute(msg);
+            } else {
+                EditMessageText edit = new EditMessageText();
+                edit.setChatId(String.valueOf(chatId)); edit.setMessageId(messageId);
+                edit.setText(sb.toString()); edit.setParseMode("HTML"); edit.setReplyMarkup(markup);
+                execute(edit);
+            }
+        } catch (TelegramApiException e) {}
+    }
+
+    private void updateWriteOffUI(long chatId, Integer messageId, String text) {
+        if (messageId == null) return;
+        InlineKeyboardMarkup markup = new InlineKeyboardMarkup(List.of(
+                List.of(createBtn("🔙 Назад к списку", "WO_BACK_LIST"), createBtn("❌ Отменить", "CANCEL_PROMPT"))
+        ));
+        EditMessageText edit = new EditMessageText();
+        edit.setChatId(String.valueOf(chatId)); edit.setMessageId(messageId);
+        edit.setText(text); edit.setParseMode("HTML"); edit.setReplyMarkup(markup);
+        try { execute(edit); } catch (Exception e) {}
+    }
+
+    private void sendClosingCodeButtons(long chatId, String phone, String contract, Integer messageId) {
         String warning = DatabaseManager.checkCode212History(phone, contract);
         InlineKeyboardMarkup markup = new InlineKeyboardMarkup(List.of(
                 List.of(createBtn("212 — Участок ОРК–ОРА (не чаще 6 мес!)", "WO_CODE:212")),
@@ -3066,10 +3737,17 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 List.of(createBtn("215 — В ОРШ: выправление пигтейла", "WO_CODE:215")),
                 List.of(createBtn("226 — В ОРШ: замена адаптера", "WO_CODE:226")),
                 List.of(createBtn("214 — Участок ОРШ–ОРК: ремонт райзера", "WO_CODE:214")),
-                List.of(createBtn("217 — Участок ОРШ–ОРК: запасной модуль", "WO_CODE:217"))
+                List.of(createBtn("217 — Участок ОРШ–ОРК: запасной модуль", "WO_CODE:217")),
+                List.of(createBtn("🔙 Назад к списку", "WO_BACK_LIST"), createBtn("❌ Отменить", "CANCEL_PROMPT"))
         ));
-        SendMessage msg = new SendMessage(String.valueOf(chatId), "🔢 <b>Шаг 4 из 5:</b> Выберите <b>код закрытия заявки</b>:" + warning);
-        msg.setParseMode("HTML"); msg.setReplyMarkup(markup); try { execute(msg); } catch (TelegramApiException e) {}
+        String text = "🔢 <b>Шаг 4 из 5:</b> Выберите <b>код закрытия заявки</b>:" + warning;
+
+        if (messageId != null) {
+            EditMessageText edit = new EditMessageText();
+            edit.setChatId(String.valueOf(chatId)); edit.setMessageId(messageId);
+            edit.setText(text); edit.setParseMode("HTML"); edit.setReplyMarkup(markup);
+            try { execute(edit); } catch (Exception e) {}
+        }
     }
 
     private void sendWarehouseList(long chatId, String role) {
@@ -3196,9 +3874,19 @@ public class WarehouseBot extends TelegramLongPollingBot {
 
     // 1. Отправка новой панели управления
     private void sendToolManagementMenu(long chatId) {
+        sendToolManagementMenu(chatId, null);
+    }
+
+    private void sendToolManagementMenu(long chatId, String alertText) {
+        StringBuilder sb = new StringBuilder();
+        if (alertText != null && !alertText.isEmpty()) {
+            sb.append(alertText).append("\n\n➖➖➖➖➖➖➖➖➖➖\n");
+        }
+        sb.append("🧰 <b>Панель управления инструментом</b>\nВыберите нужное действие:");
+
         SendMessage message = new SendMessage();
         message.setChatId(String.valueOf(chatId));
-        message.setText("🧰 <b>Панель управления инструментом</b>\nВыберите нужное действие:");
+        message.setText(sb.toString());
         message.setParseMode("HTML");
         message.setReplyMarkup(getToolMenuInlineMarkup());
         try { execute(message); } catch (Exception e) { e.printStackTrace(); }
@@ -3206,10 +3894,20 @@ public class WarehouseBot extends TelegramLongPollingBot {
 
     // 2. Возврат в главное меню панели
     private void editToolManagementMenu(long chatId, int messageId) {
+        editToolManagementMenu(chatId, messageId, null);
+    }
+
+    private void editToolManagementMenu(long chatId, int messageId, String alertText) {
+        StringBuilder sb = new StringBuilder();
+        if (alertText != null && !alertText.isEmpty()) {
+            sb.append(alertText).append("\n\n➖➖➖➖➖➖➖➖➖➖\n");
+        }
+        sb.append("🧰 <b>Панель управления инструментом</b>\nВыберите нужное действие:");
+
         EditMessageText edit = new EditMessageText();
         edit.setChatId(String.valueOf(chatId));
         edit.setMessageId(messageId);
-        edit.setText("🧰 <b>Панель управления инструментом</b>\nВыберите нужное действие:");
+        edit.setText(sb.toString());
         edit.setParseMode("HTML");
         edit.setReplyMarkup(getToolMenuInlineMarkup());
         try { execute(edit); } catch (Exception e) { e.printStackTrace(); }
@@ -3495,6 +4193,69 @@ public class WarehouseBot extends TelegramLongPollingBot {
         } catch (TelegramApiException e) {}
     }
 
+    // Метод для уведомления ответственных за график (Козлов и Белевич)
+    private void notifyManagersAboutSickLeave(String text) {
+        List<String> allNames = DatabaseManager.getAllExcelNames();
+        List<Long> admins = DatabaseManager.getAdminIds();
+
+        for (String name : allNames) {
+            // Ищем нужных людей по части фамилии
+            if (name.contains("Козлов") || name.contains("Белевич")) {
+                Long managerId = DatabaseManager.getUserIdByExcelName(name);
+                // Отправляем им уведомление (если нашли ID и если они сами не являются админами, чтобы не дублировать)
+                if (managerId != null && !admins.contains(managerId)) {
+                    sendDirectNotification(managerId, text);
+                }
+            }
+        }
+    }
+
+    // Умный парсер дат: понимает форматы "10.11", "10.11.26" и "10.11.2026"
+    private java.time.LocalDate parseSmartDate(String input, int currentYear, int currentMonth) throws Exception {
+        String cleanInput = input.trim();
+        String[] parts = cleanInput.split("\\.");
+
+        if (parts.length < 2) throw new Exception("Неверный формат даты");
+
+        int day = Integer.parseInt(parts[0]);
+        int month = Integer.parseInt(parts[1]);
+        int year = currentYear;
+
+        if (parts.length == 3) {
+            year = Integer.parseInt(parts[2]);
+            // Если ввели двузначный год (например, 26), превращаем в 2026
+            if (year < 100) {
+                year += 2000;
+            }
+        } else {
+            // Если год не указан (ввели только "10.11"), проверяем переход через Новый год
+            if (currentMonth == 12 && month == 1) {
+                year++;
+            }
+        }
+
+        return java.time.LocalDate.of(year, month, day);
+    }
+
     public Map<Long, Integer> getForceWelderReturnIds() { return forceWelderReturnIds; }
     public Map<Long, LocalDate> getKeptWelderForTomorrow() { return keptWelderForTomorrow; }
+
+    private String getModemErrorsText() {
+        return "🌐 <b>Неисправности модемов:</b>\n\n" +
+                "• Низкий уровень Wi-Fi\n• Не раздает Wi-Fi\n• Нестабильный уровень Wi-Fi\n" +
+                "• Замена на двухдиапазонный\n• Нет услуг\n• Не регистрируется\n• Не работает телефония\n" +
+                "• LOS\n• Постоянная перезагрузка\n• Не работает LAN\n• Горит только power\n" +
+                "• Не включается\n• Посторонние звуки\n• Запах гари\n• Пропадает сессия\n" +
+                "• Пропадает соединение по LAN\n• Отключается сеть 5G\n• Нужны гигабитные порты\n" +
+                "• Горит LOS и PON, не работают услуги\n• Отключается";
+    }
+
+    private String getStbErrorsText() {
+        return "📺 <b>Неисправности приставок:</b>\n\n" +
+                "• Ошибка 1901\n• Ошибка 1305\n• Ошибка 1306\n• Зависание\n• Нет звука\n" +
+                "• Нет питания\n• Постоянная перезагрузка\n• Не реагирует на пульт\n• Нет изображения\n" +
+                "• Пропадает изображение\n• Мерцание\n• Нечёткое изображение\n• Нет авторизации\n" +
+                "• Ошибка смарт-карты\n• Не работает LAN\n• Нет сигнала\n• Посторонние звуки\n" +
+                "• Запах гари\n• Не работает разъем HDMI\n• Не работает разъем 3RCA\n• Замена на модель с HDMI";
+    }
 }

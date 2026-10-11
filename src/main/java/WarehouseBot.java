@@ -785,6 +785,16 @@ public class WarehouseBot extends TelegramLongPollingBot {
         keyboardMarkup.setResizeKeyboard(true);
 
         List<KeyboardRow> keyboard = new ArrayList<>();
+
+        // 👈 ПЕРВЫМ ДЕЛОМ проверяем доступ к ТМ и выносим кнопку НА САМЫЙ ВЕРХ
+        boolean tmAccess = canAccessTm(chatId, role);
+        if ("ADMIN".equals(role) || tmAccess) {
+            KeyboardRow tmRow = new KeyboardRow();
+            tmRow.add("🛠 Мои заявки (ТМ)");
+            keyboard.add(tmRow);
+        }
+
+        // Далее идут стандартные ряды меню
         KeyboardRow r1 = new KeyboardRow(); r1.add("📦 Склад (Наличие и цены)"); r1.add("🧰 Мой подотчет"); keyboard.add(r1);
         KeyboardRow r2 = new KeyboardRow(); r2.add("📝 Списать / Вернуть"); r2.add("⚡️ Сварочные аппараты"); keyboard.add(r2);
         KeyboardRow r3 = new KeyboardRow(); r3.add("🧾 Калькулятор квитанции"); r3.add("📋 Тарифы услуг"); keyboard.add(r3);
@@ -792,17 +802,14 @@ public class WarehouseBot extends TelegramLongPollingBot {
         KeyboardRow r5 = new KeyboardRow(); r5.add("🔢 Коды закрытия"); r5.add("📞 Справочник"); keyboard.add(r5);
         KeyboardRow r6 = new KeyboardRow(); r6.add("🛠 Неисправности"); keyboard.add(r6);
 
-        boolean tmAccess = canAccessTm(chatId, role);
-
         if ("ADMIN".equals(role)) {
             KeyboardRow a1 = new KeyboardRow(); a1.add("📊 У кого что на руках"); a1.add("🛠 Управление инструментом"); keyboard.add(a1);
             KeyboardRow a2 = new KeyboardRow(); a2.add("📑 Скачать отчет за месяц"); a2.add("📊 Статистика ОРШ"); keyboard.add(a2);
             KeyboardRow a3 = new KeyboardRow(); a3.add("📢 Сделать рассылку"); a3.add("👥 Пользователи"); keyboard.add(a3);
             KeyboardRow a4 = new KeyboardRow(); a4.add("📥 Загрузки (Excel)"); keyboard.add(a4);
-            KeyboardRow a5 = new KeyboardRow(); a5.add("🛠 Мои заявки (ТМ)"); keyboard.add(a5);
-        } else if (tmAccess) {
-            KeyboardRow w6 = new KeyboardRow(); w6.add("🛠 Мои заявки (ТМ)"); keyboard.add(w6);
+            // Убираем отсюда старое добавление ТМ в конец, так как мы подняли его наверх ↑
         }
+
         keyboardMarkup.setKeyboard(keyboard);
         try {
             if (text.length() <= 3900) { SendMessage msg = new SendMessage(String.valueOf(chatId), text); msg.setParseMode("HTML"); msg.setReplyMarkup(keyboardMarkup); execute(msg); }
@@ -1309,6 +1316,52 @@ public class WarehouseBot extends TelegramLongPollingBot {
                     // ПН, ВТ, СР, ЧТ: Сразу показываем завтра (+1 день)
                     sendScheduleTextSection(chatId, messageId, DatabaseManager.getTargetDayRoster(1, "Завтра"));
                 }
+                return;
+            }
+
+            // Главное меню ТМ-доступов (SPA)
+            if (data.equals("ADM_TM_ACCESS_MAIN") && "ADMIN".equals(role)) {
+                sendAdminTmAccessMain(chatId, messageId);
+                return;
+            }
+
+            // Список сотрудников с доступом
+            if (data.equals("ADM_TM_HAS_ACCESS") && "ADMIN".equals(role)) {
+                sendAdminTmUsersList(chatId, messageId, true);
+                return;
+            }
+
+            // Список сотрудников без доступа
+            if (data.equals("ADM_TM_NO_ACCESS") && "ADMIN".equals(role)) {
+                sendAdminTmUsersList(chatId, messageId, false);
+                return;
+            }
+
+            if (data.startsWith("ADM_TM_TOGGLE:") && "ADMIN".equals(role)) {
+                String[] parts = data.split(":");
+                long targetUserId = Long.parseLong(parts[1]);
+                boolean grant = Boolean.parseBoolean(parts[2]);
+                boolean viewingHasAccess = Boolean.parseBoolean(parts[3]); // В каком списке находились
+
+                DatabaseManager.setTmAccess(targetUserId, grant);
+
+                // Уведомляем сотрудника в ЛС
+                if (grant) {
+                    sendDirectNotification(targetUserId, "✅ <b>Вам предоставлен доступ к разделу «Мои заявки (ТМ)»!</b>\nТеперь кнопка появилась в вашем главном меню.");
+
+                    // 👈 ДЛЯ ВЫДАЧИ: Принудительно обновляем меню мастеру, чтобы появилась кнопка
+                    String targetRole = DatabaseManager.getUserRole(targetUserId, "Сотрудник");
+                    sendMenu(targetUserId, targetRole, "🔄 <b>Ваше меню обновлено:</b> добавлен доступ к разделу ТМ.");
+                } else {
+                    sendDirectNotification(targetUserId, "⚠️ <b>Доступ к разделу «Мои заявки (ТМ)» был отозван руководителем.</b>");
+
+                    // 👈 ДЛЯ ОТМЕНЫ: Принудительно обновляем меню мастеру, чтобы кнопка пропала!
+                    String targetRole = DatabaseManager.getUserRole(targetUserId, "Сотрудник");
+                    sendMenu(targetUserId, targetRole, "🔄 <b>Ваше меню обновлено:</b> доступ к разделу ТМ был закрыт.");
+                }
+
+                // Мгновенно обновляем текущий список в том же сообщении (SPA)
+                sendAdminTmUsersList(chatId, messageId, viewingHasAccess);
                 return;
             }
 
@@ -3823,9 +3876,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
 
     private boolean canAccessTm(long chatId, String role) {
         if ("ADMIN".equals(role)) return true;
-        String excelName = DatabaseManager.getUserExcelName(chatId);
-        // Даем доступ если фамилия содержит Петрович ИЛИ Афанасьев
-        return excelName != null && (excelName.contains("Петрович") || excelName.contains("Афанасьев") || excelName.contains("Прищепчик"));
+        return DatabaseManager.hasTmAccess(chatId);
     }
 
     // 1. Отправка новой панели управления
@@ -4127,6 +4178,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
     private void sendAdminUsersControlPanel(long chatId, Integer messageId) {
         InlineKeyboardMarkup markup = new InlineKeyboardMarkup(List.of(
                 List.of(createBtn("📋 Список сотрудников", "ADM_PANEL_LIST")),
+                List.of(createBtn("🔐 Управление доступом к ТМ", "ADM_TM_ACCESS_MAIN")), // 👈 НОВАЯ КНОПКА
                 List.of(createBtn("✏️ Переименовать (/fix_name)", "ADM_PANEL_RENAME"), createBtn("🗑 Удалить (/fire)", "ADM_PANEL_DELETE")),
                 List.of(createBtn("🔗 Сбросить привязку (/unbind)", "ADM_PANEL_UNBIND")),
                 List.of(createBtn("🧹 Очистить склад", "ADM_PANEL_CLR_STOCK"), createBtn("🛠 Сброс зависших заявок", "ADM_PANEL_FIX_REQ")),
@@ -4213,5 +4265,49 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 "• Пропадает изображение\n• Мерцание\n• Нечёткое изображение\n• Нет авторизации\n" +
                 "• Ошибка смарт-карты\n• Не работает LAN\n• Нет сигнала\n• Посторонние звуки\n" +
                 "• Запах гари\n• Не работает разъем HDMI\n• Не работает разъем 3RCA\n• Замена на модель с HDMI";
+    }
+
+    private void sendAdminTmAccessMain(long chatId, int messageId) {
+        InlineKeyboardMarkup markup = new InlineKeyboardMarkup(List.of(
+                List.of(createBtn("🟢 С доступом", "ADM_TM_HAS_ACCESS"), createBtn("🔴 Без доступа", "ADM_TM_NO_ACCESS")),
+                List.of(createBtn("🔙 Назад в панель управления", "ADM_PANEL_MAIN"))
+        ));
+        EditMessageText edit = new EditMessageText();
+        edit.setChatId(String.valueOf(chatId)); edit.setMessageId(messageId);
+        edit.setText("🔐 <b>Управление доступом к ТМ</b>\n\nВыберите категорию сотрудников для просмотра и изменения прав:");
+        edit.setParseMode("HTML"); edit.setReplyMarkup(markup);
+        try { execute(edit); } catch (Exception e) {}
+    }
+
+    private void sendAdminTmUsersList(long chatId, int messageId, boolean hasAccess) {
+        List<String[]> users = DatabaseManager.getUsersByTmAccess(hasAccess);
+        InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
+        List<List<InlineKeyboardButton>> rows = new ArrayList<>();
+
+        if (users.isEmpty()) {
+            rows.add(List.of(createBtn("ℹ️ Список пуст", "IGNORE")));
+        } else {
+            for (String[] u : users) {
+                long uId = Long.parseLong(u[0]);
+                String name = u[1];
+                if (hasAccess) {
+                    // Кнопка забрать доступ
+                    rows.add(List.of(createBtn("👤 " + name + " ❌ [Забрать]", "ADM_TM_TOGGLE:" + uId + ":false:true")));
+                } else {
+                    // Кнопка дать доступ
+                    rows.add(List.of(createBtn("👤 " + name + " ✅ [Дать доступ]", "ADM_TM_TOGGLE:" + uId + ":true:false")));
+                }
+            }
+        }
+
+        rows.add(List.of(createBtn("🔙 Назад к выбору", "ADM_TM_ACCESS_MAIN")));
+        markup.setKeyboard(rows);
+
+        String title = hasAccess ? "🟢 <b>Сотрудники С ДОСТУПОМ к ТМ:</b>\nНажмите на сотрудника, чтобы забрать доступ:" : "🔴 <b>Сотрудники БЕЗ ДОСТУПА к ТМ:</b>\nНажмите на сотрудника, чтобы дать доступ:";
+
+        EditMessageText edit = new EditMessageText();
+        edit.setChatId(String.valueOf(chatId)); edit.setMessageId(messageId);
+        edit.setText(title); edit.setParseMode("HTML"); edit.setReplyMarkup(markup);
+        try { execute(edit); } catch (Exception e) {}
     }
 }

@@ -115,8 +115,7 @@ public class TmClient {
                 .append(" (").append(filtered.length()).append("):</b>\n\n");
 
         for (int i = 0; i < filtered.length(); i++) {
-            sb.append(formatTask(filtered.getJSONObject(i))).append("\n\n———\n\n");
-        }
+            sb.append(formatTask(filtered.getJSONObject(i))).append("\n\n————————————————————\n\n");        }
         return sb.toString();
     }
 

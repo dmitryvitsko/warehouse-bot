@@ -41,9 +41,14 @@ public class DatabaseManager {
                         CREATE TABLE IF NOT EXISTS users (
                             id INTEGER PRIMARY KEY,
                             full_name TEXT NOT NULL,
-                            role TEXT DEFAULT 'WORKER'
+                            role TEXT DEFAULT 'WORKER',
+                            tm_access INTEGER DEFAULT 0
                         );
                     """);
+
+            try {
+                stmt.execute("ALTER TABLE users ADD COLUMN tm_access INTEGER DEFAULT 0;");
+            } catch (SQLException ignored) {}
 
             stmt.execute("CREATE INDEX IF NOT EXISTS idx_sched_v2_name ON schedules_v2(excel_name);");
             stmt.execute("CREATE INDEX IF NOT EXISTS idx_tools_assigned ON tools(assigned_to);");
@@ -1081,17 +1086,23 @@ public class DatabaseManager {
         return """
                 🔢 <b>Шпаргалка по кодам закрытия заявок:</b>
                 
-                📍 <b>Участок ОРК ↔ ОРА (от коробки до розетки абонента):</b>
-                • <b>Код 212</b> — Работы со списанием материалов (не чаще 6 мес!).
-                • <b>Код 227</b> — Выправление волокна без списания материала (без ограничений).
+                📍 <b>Абонентский участок:</b>
+                • <b>Код 102</b> — Квитанция.
+                • <b>Код 109</b> — Перемонтаж пигтейла в ОРА.
+                • <b>Код 111</b> — Перемонтаж ВОК-1 в ОРА.
+                • <b>Код 113</b> — Другие повреждения на абонентском участке.
                 
-                📍 <b>Работы в ОРШ:</b>
-                • <b>Код 215</b> — Выправление положения пигтейла/волокна (без материалов).
-                • <b>Код 226</b> — Замена пигтейла/адаптера (с материалами).
+                📍 <b>Участок ОРК ↔ ОРА (от распределительной коробки до розетки абонента):</b>
+                • <b>Код 212</b> — Перемонтаж ВОК-1 на ОРК, работы со списанием материалов на участке ОРК ↔ ОРА.
+                • <b>Код 227</b> — Выправление волокна без списания материала на участке ОРК ↔ ОРА.
                 
-                📍 <b>Участок ОРШ ↔ ОРК:</b>
-                • <b>Код 214</b> — Ремонт/замена райзера.
-                • <b>Код 217</b> — Переход на запасной модуль (КДЗС).
+                📍 <b>Участок ОРШ ↔ ОРК (магистральный / распределительный участок):</b>
+                • <b>Код 214</b> — Ремонт или замена райзера на участке ОРШ ↔ ОРК.
+                • <b>Код 217</b> — Переход на запасной модуль (КДЗС) на участке ОРШ ↔ ОРК.
+                
+                📍 <b>Работы в ОРШ (оптическом распределительном шкафу):</b>
+                • <b>Код 215</b> — Выправление положения пигтейла или волокна в ОРШ (без использования материалов).
+                • <b>Код 226</b> — Замена пигтейла или адаптера в ОРШ (с использованием материалов).
                 """;
     }
 
@@ -3108,6 +3119,54 @@ public class DatabaseManager {
         }
 
         return found ? sb.toString().trim() : null;
+    }
+
+    // Проверка, есть ли у пользователя доступ к ТМ
+    public static boolean hasTmAccess(long userId) {
+        try (Connection conn = getConnection();
+             PreparedStatement ps = conn.prepareStatement("SELECT tm_access FROM users WHERE id = ?")) {
+            ps.setLong(1, userId);
+            ResultSet rs = ps.executeQuery();
+            if (rs.next()) {
+                return rs.getInt("tm_access") == 1;
+            }
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
+        return false;
+    }
+
+    // Получить список сотрудников с доступом (1) или без доступа (0)
+    public static List<String[]> getUsersByTmAccess(boolean access) {
+        List<String[]> list = new ArrayList<>();
+        String sql = "SELECT id, full_name FROM users WHERE role != 'ADMIN' AND role != 'BANNED' AND tm_access = ? ORDER BY full_name";
+        try (Connection conn = getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setInt(1, access ? 1 : 0);
+            ResultSet rs = ps.executeQuery();
+            while (rs.next()) {
+                list.add(new String[]{
+                        String.valueOf(rs.getLong("id")),
+                        rs.getString("full_name")
+                });
+            }
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
+        return list;
+    }
+
+    // Изменить статус доступа к ТМ
+    public static boolean setTmAccess(long userId, boolean grant) {
+        try (Connection conn = getConnection();
+             PreparedStatement ps = conn.prepareStatement("UPDATE users SET tm_access = ? WHERE id = ?")) {
+            ps.setInt(1, grant ? 1 : 0);
+            ps.setLong(2, userId);
+            return ps.executeUpdate() > 0;
+        } catch (SQLException e) {
+            e.printStackTrace();
+            return false;
+        }
     }
 
 }

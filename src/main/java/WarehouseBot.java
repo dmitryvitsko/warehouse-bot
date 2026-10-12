@@ -1070,6 +1070,10 @@ public class WarehouseBot extends TelegramLongPollingBot {
             return;
         }
 
+        // 👇 ДОБАВЛЕНА ЭТА СТРОКА: Бот запоминает, что ждет цифру для этого материала
+        waitingTakeMaterialId.put(chatId, materialId);
+        // -------------------------------------------------------------------------
+
         String name = mat[3];
         String unit = mat[4];
         String price = mat[6];
@@ -1105,6 +1109,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
             execute(edit);
         } catch (TelegramApiException e) {}
     }
+
     @Override
     public void onUpdateReceived(Update update) {
         if (update.hasMessage() && update.getMessage().hasDocument()) {
@@ -1235,7 +1240,6 @@ public class WarehouseBot extends TelegramLongPollingBot {
         }
 
         if (update.hasCallbackQuery()) {
-
             long chatId = update.getCallbackQuery().getMessage().getChatId();
             String data = update.getCallbackQuery().getData();
             String firstName = update.getCallbackQuery().getFrom().getFirstName();
@@ -1362,28 +1366,6 @@ public class WarehouseBot extends TelegramLongPollingBot {
 
                 // Мгновенно обновляем текущий список в том же сообщении (SPA)
                 sendAdminTmUsersList(chatId, messageId, viewingHasAccess);
-                return;
-            }
-            // Возврат в главное меню ТМ (Выбор: В работе / Закрытые)
-            if (data.equals("TM_MAIN_MENU")) {
-                if (!canAccessTm(chatId, role)) return;
-                JSONArray tasks = fetchTmTasks(chatId);
-                int inProgress = TmClient.countByStatus(tasks, false);
-                int closedCount = TmClient.countByStatus(tasks, true);
-
-                InlineKeyboardMarkup markup = new InlineKeyboardMarkup(List.of(
-                        List.of(createBtn("📋 В работе (" + inProgress + ")", "TM_INPROGRESS")),
-                        List.of(createBtn("✅ Закрытые (" + closedCount + ")", "TM_CLOSED")),
-                        List.of(createBtn("❌ Закрыть панель", "GENERIC_CLOSE"))
-                ));
-
-                EditMessageText edit = new EditMessageText();
-                edit.setChatId(String.valueOf(chatId));
-                edit.setMessageId(messageId);
-                edit.setText("🛠 <b>Мои заявки ТМ</b>\nВыберите раздел:");
-                edit.setParseMode("HTML");
-                edit.setReplyMarkup(markup);
-                try { execute(edit); } catch (Exception e) {}
                 return;
             }
 
@@ -1772,6 +1754,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
             }
 
             if (data.startsWith("WH_PAGE:")) {
+                waitingTakeMaterialId.remove(chatId); // 👈 Сброс ожидания ввода текста
                 int page = Integer.parseInt(data.split(":")[1]);
                 sendWarehousePage(chatId, page, messageId, null);
                 return;
@@ -1782,6 +1765,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 return;
             }
             if (data.startsWith("WH_TAKE:")) {
+                waitingTakeMaterialId.remove(chatId); // 👈 Сброс ожидания ввода текста
                 String[] p = data.split(":");
                 int matId = Integer.parseInt(p[1]);
                 double qtyToTake = Double.parseDouble(p[2]);
@@ -1799,6 +1783,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 return;
             }
             if (data.equals("WH_CLOSE")) {
+                waitingTakeMaterialId.remove(chatId); // 👈 Сброс ожидания ввода текста
                 try {
                     DeleteMessage delete = new DeleteMessage(String.valueOf(chatId), messageId);
                     execute(delete);
@@ -1924,22 +1909,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
             if ("TM_CLOSED".equals(data)) {
                 if (!canAccessTm(chatId, role)) return;
                 JSONArray tasks = fetchTmTasks(chatId);
-
-                // Используем EditMessageText для текущего окна
-                EditMessageText edit = new EditMessageText();
-                edit.setChatId(String.valueOf(chatId));
-                edit.setMessageId(messageId);
-                edit.setText(TmClient.formatTasksText(tasks, true));
-                edit.setParseMode("HTML");
-
-                // Кнопка возврата к выбору заявок
-                InlineKeyboardMarkup markup = new InlineKeyboardMarkup(List.of(
-                        List.of(createBtn("🔙 Назад к меню ТМ", "TM_MAIN_MENU"))
-                ));
-                edit.setReplyMarkup(markup);
-
-                try { execute(edit); } catch (TelegramApiException e) {}
-
+                sendClosableMessage(chatId, TmClient.formatTasksText(tasks, true));
                 AnswerCallbackQuery answer = new AnswerCallbackQuery();
                 answer.setCallbackQueryId(update.getCallbackQuery().getId());
                 try { execute(answer); } catch (TelegramApiException e) {}
@@ -2039,12 +2009,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
                     String repTxt = "Выполнил служебное поручение";
                     String tmSess = DatabaseManager.getTmSession(chatId);
                     boolean ok = tmSess != null && TmClient.performTask(tmSess, session.taskId, repTxt);
-                    if (ok) {
-                        updateReportUI(chatId, session, "✅ Отчёт #" + session.taskId + " отправлен:\n<i>" + repTxt + "</i>", new InlineKeyboardMarkup(List.of(
-                                // ИСПОЛЬЗУЕМ TM_REP_CANCEL ДЛЯ ИДЕАЛЬНОГО ВОЗВРАТА К СПИСКУ
-                                List.of(createBtn("📋 Вернуться к заявкам", "TM_REP_CANCEL"))
-                        )));
-                    }
+                    if (ok) updateReportUI(chatId, session, "✅ Отчёт #" + session.taskId + " отправлен:\n<i>" + repTxt + "</i>", new InlineKeyboardMarkup(List.of(List.of(createBtn("❌ Закрыть", "CANCEL_PROMPT")))));
                 }
                 return;
             }
@@ -2147,8 +2112,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
                         : "⚠️ Материалы списаны, но <b>не удалось отправить отчет в ТМ</b> (проверьте подключение или статус заявки).";
 
                 updateReportUI(chatId, session, statusMsg, new InlineKeyboardMarkup(List.of(
-                        // ИСПОЛЬЗУЕМ TM_REP_CANCEL ДЛЯ ИДЕАЛЬНОГО ВОЗВРАТА К СПИСКУ
-                        List.of(createBtn("📋 Вернуться к заявкам", "TM_REP_CANCEL"))
+                        List.of(createBtn("📋 Вернуться к заявкам", "TM_INPROGRESS"))
                 )));
                 return;
             }
@@ -3318,6 +3282,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 } catch (Exception e) {} return;
             }
 
+            // 👇👇👇 ИСПРАВЛЕННЫЙ БЛОК: ПЕРЕХВАТЧИК КОЛИЧЕСТВА МАТЕРИАЛА 👇👇👇
             if (waitingTakeMaterialId.containsKey(chatId)) {
                 try {
                     double qty = Double.parseDouble(text.trim().replace(",", "."));
@@ -3325,8 +3290,10 @@ public class WarehouseBot extends TelegramLongPollingBot {
                     if (result.startsWith("✅")) { waitingTakeMaterialId.remove(chatId); sendMenu(chatId, role, result); }
                     else { SendMessage msg = new SendMessage(String.valueOf(chatId), result); msg.setParseMode("HTML"); try { execute(msg); } catch (TelegramApiException e) {} }
                 } catch (NumberFormatException e) { sendCancelKeyboard(chatId, "❌ Введите корректное число (например: <code>5</code> или <code>0.05</code>)."); }
-                return;
+                return; // 👈 Выходим, чтобы текст не пошел в switch и не запустил глобальный поиск!
             }
+            // 👆👆👆 КОНЕЦ ИСПРАВЛЕННОГО БЛОКА 👆👆👆
+
             if (waitingToolWriteOffReason.containsKey(chatId)) {
                 String res = DatabaseManager.writeOffTool(waitingToolWriteOffReason.remove(chatId), text);
                 clearChatHistory(chatId); // Удаляет и сообщение юзера, и окно вопроса
@@ -3467,10 +3434,6 @@ public class WarehouseBot extends TelegramLongPollingBot {
                     }
                 }
 
-
-
-
-
                 case "📦 Склад (Наличие и цены)" -> {
                     sendWarehousePage(chatId, 1, null, null);
                 }
@@ -3504,7 +3467,8 @@ public class WarehouseBot extends TelegramLongPollingBot {
                         msg.setParseMode("HTML"); msg.setReplyMarkup(markup); try { execute(msg); } catch (TelegramApiException e) {}
                     }
                 }
-                case "📊 У кого что на руках" -> { if (role.equals("ADMIN")) sendClosableMessage(chatId, DatabaseManager.getAllWorkersBalancesText()); }                case "📑 Скачать отчет за месяц" -> { if (role.equals("ADMIN")) sendExcelReport(chatId, role); }
+                case "📊 У кого что на руках" -> { if (role.equals("ADMIN")) sendClosableMessage(chatId, DatabaseManager.getAllWorkersBalancesText()); }
+                case "📑 Скачать отчет за месяц" -> { if (role.equals("ADMIN")) sendExcelReport(chatId, role); }
                 case "📢 Сделать рассылку" -> { if (role.equals("ADMIN")) { fileWaitState.put(chatId, "WAIT_BROADCAST_TEXT"); sendCancelKeyboard(chatId, "📢 <b>Режим массовой рассылки</b>\n\nВведите текст сообщения:"); } }
                 case "👥 Пользователи" -> {
                     if (role.equals("ADMIN")) sendAdminUsersControlPanel(chatId, null);

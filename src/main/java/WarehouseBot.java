@@ -108,6 +108,13 @@ public class WarehouseBot extends TelegramLongPollingBot {
     private final Map<Long, PendingWelderTransfer> pendingWelderTransfers = new ConcurrentHashMap<>();
     private final Map<Long, Long> activeSenderTransfers = new ConcurrentHashMap<>();
 
+    public static class WhTakeSession {
+        public int materialId;
+        public int page;
+        public int anchorMsgId;
+    }
+    private final Map<Long, WhTakeSession> whTakeSessions = new ConcurrentHashMap<>();
+
     private static final Properties config = new Properties();
     static {
         try (FileInputStream fis = new FileInputStream("config.properties")) {
@@ -523,7 +530,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
         InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
         List<List<InlineKeyboardButton>> rows = new ArrayList<>();
         for (String[] g : groups) rows.add(List.of(createBtn((g[1].length() > 30 ? g[1].substring(0, 30) + "…" : g[1]) + " (в наличии: " + g[2] + " шт)", "T_SEL_N:" + g[0])));
-        rows.add(List.of(createBtn("🔙 Назад", "TOOL_MAIN_MENU")));
+        rows.add(List.of(createBtn("🔙 Назад", "tool_menu_main")));
         markup.setKeyboard(rows);
 
         EditMessageText edit = new EditMessageText();
@@ -555,7 +562,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
         InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
         List<List<InlineKeyboardButton>> rows = new ArrayList<>();
         for (String[] u : users) rows.add(List.of(createBtn("👤 " + u[1], "T_RET_U:" + u[0])));
-        rows.add(List.of(createBtn("🔙 Назад", "TOOL_MAIN_MENU")));
+        rows.add(List.of(createBtn("🔙 Назад", "tool_menu_main")));
         markup.setKeyboard(rows);
 
         EditMessageText edit = new EditMessageText();
@@ -659,7 +666,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
         InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
         List<List<InlineKeyboardButton>> rows = new ArrayList<>();
         for (String[] t : tools) rows.add(List.of(createBtn("♻ " + (t[1].length() > 20 ? t[1].substring(0, 20) + "…" : t[1]) + " (Инв: " + t[2] + ")", "T_RES_DO:" + t[0])));
-        rows.add(List.of(createBtn("🔙 Назад", "TOOL_MAIN_MENU")));
+        rows.add(List.of(createBtn("🔙 Назад", "tool_menu_main")));
         markup.setKeyboard(rows);
 
         EditMessageText edit = new EditMessageText();
@@ -1057,57 +1064,43 @@ public class WarehouseBot extends TelegramLongPollingBot {
 
     // Метод 2: Карточка конкретного материала (Выбор количества)
     private void sendMaterialCard(long chatId, int materialId, int page, Integer messageId) {
-        List<String[]> materials = DatabaseManager.getAvailableMaterials();
-        String[] mat = null;
-        for (String[] m : materials) {
-            if (Integer.parseInt(m[0]) == materialId) {
-                mat = m; break;
-            }
-        }
+        sendMaterialCard(chatId, materialId, page, messageId, null);
+    }
 
+    private void sendMaterialCard(long chatId, int materialId, int page, Integer messageId, String alert) {
+        String[] mat = null;
+        for (String[] m : DatabaseManager.getAvailableMaterials()) {
+            if (Integer.parseInt(m[0]) == materialId) { mat = m; break; }
+        }
         if (mat == null) {
+            whTakeSessions.remove(chatId);
             sendWarehousePage(chatId, page, messageId, "❌ Материал закончился на складе.");
             return;
         }
 
-        // 👇 ДОБАВЛЕНА ЭТА СТРОКА: Бот запоминает, что ждет цифру для этого материала
-        waitingTakeMaterialId.put(chatId, materialId);
-        // -------------------------------------------------------------------------
+        WhTakeSession s = new WhTakeSession();
+        s.materialId = materialId; s.page = page; s.anchorMsgId = messageId;
+        whTakeSessions.put(chatId, s);
 
-        String name = mat[3];
-        String unit = mat[4];
-        String price = mat[6];
-        String qty = mat[7];
+        String name = mat[3], unit = mat[4], price = mat[6], qty = mat[7];
+        StringBuilder sb = new StringBuilder();
+        if (alert != null) sb.append(alert).append("\n\n➖➖➖➖➖➖➖➖➖➖\n");
+        sb.append(String.format("📦 <b>%s</b>\n\n• На складе: <b>%s %s</b>\n• Цена с НДС: <b>%s руб.</b>\n\n✍️ <b>Напишите количество (%s) в чат</b> ИЛИ выберите кнопкой:",
+                name, qty, unit, price, unit));
 
-        String text = String.format("📦 <b>%s</b>\n\n• На складе: <b>%s %s</b>\n• Цена с НДС: <b>%s руб.</b>\n\n👇 <b>Сколько %s берем в подотчет?</b>",
-                name, qty, unit, price, unit);
-
-        InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
-        List<List<InlineKeyboardButton>> rows = new ArrayList<>();
-
-        rows.add(List.of(
-                createBtn("1", "WH_TAKE:" + materialId + ":1:" + page),
-                createBtn("2", "WH_TAKE:" + materialId + ":2:" + page),
-                createBtn("3", "WH_TAKE:" + materialId + ":3:" + page),
-                createBtn("4", "WH_TAKE:" + materialId + ":4:" + page),
-                createBtn("5", "WH_TAKE:" + materialId + ":5:" + page)
-        ));
-        rows.add(List.of(
-                createBtn("10", "WH_TAKE:" + materialId + ":10:" + page),
-                createBtn("15", "WH_TAKE:" + materialId + ":15:" + page),
-                createBtn("20", "WH_TAKE:" + materialId + ":20:" + page),
-                createBtn("50", "WH_TAKE:" + materialId + ":50:" + page)
+        InlineKeyboardMarkup markup = new InlineKeyboardMarkup(List.of(
+                List.of(createBtn("1", "WH_TAKE:" + materialId + ":1:" + page), createBtn("2", "WH_TAKE:" + materialId + ":2:" + page),
+                        createBtn("3", "WH_TAKE:" + materialId + ":3:" + page), createBtn("4", "WH_TAKE:" + materialId + ":4:" + page),
+                        createBtn("5", "WH_TAKE:" + materialId + ":5:" + page)),
+                List.of(createBtn("10", "WH_TAKE:" + materialId + ":10:" + page), createBtn("15", "WH_TAKE:" + materialId + ":15:" + page),
+                        createBtn("20", "WH_TAKE:" + materialId + ":20:" + page), createBtn("50", "WH_TAKE:" + materialId + ":50:" + page)),
+                List.of(createBtn("🔙 Назад к списку", "WH_PAGE:" + page))
         ));
 
-        rows.add(List.of(createBtn("🔙 Назад к списку", "WH_PAGE:" + page)));
-        markup.setKeyboard(rows);
-
-        try {
-            EditMessageText edit = new EditMessageText();
-            edit.setChatId(String.valueOf(chatId)); edit.setMessageId(messageId);
-            edit.setText(text); edit.setParseMode("HTML"); edit.setReplyMarkup(markup);
-            execute(edit);
-        } catch (TelegramApiException e) {}
+        EditMessageText edit = new EditMessageText();
+        edit.setChatId(String.valueOf(chatId)); edit.setMessageId(messageId);
+        edit.setText(sb.toString()); edit.setParseMode("HTML"); edit.setReplyMarkup(markup);
+        try { execute(edit); } catch (TelegramApiException e) {}
     }
 
     @Override
@@ -1465,7 +1458,8 @@ public class WarehouseBot extends TelegramLongPollingBot {
             }
 
             if (data.equals("GENERIC_CLOSE")) {
-                clearChatHistory(chatId); // 🌪 Пылесосим весь текущий раздел!
+                whTakeSessions.remove(chatId);
+                clearChatHistory(chatId);
                 return;
             }
             // --- ПАНЕЛЬ УПРАВЛЕНИЯ ПЕРСОНАЛОМ ---
@@ -1633,6 +1627,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 return;
             }
             if (data.equals("CANCEL_PROMPT")) {
+                whTakeSessions.remove(chatId);
                 waitingNameFix.remove(chatId); waitingTakeMaterialId.remove(chatId); writeOffCartSessions.remove(chatId); fileWaitState.remove(chatId);
                 waitingToolWriteOffReason.remove(chatId); waitingOrshPhoto.remove(chatId); waitingOrshProblemReason.remove(chatId);
                 waitingDirContactCat.remove(chatId); waitingScheduleEditUser.remove(chatId); waitingScheduleEditDate.remove(chatId);
@@ -1682,7 +1677,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
                     case "tool_menu_writeoff" -> {
                         InlineKeyboardMarkup markup = new InlineKeyboardMarkup(List.of(
                                 List.of(createBtn("📦 Со склада", "T_WO_LOC:STOCK"), createBtn("👤 У сотрудника", "T_WO_LOC:ASSIGNED")),
-                                List.of(createBtn("🔙 Назад", "TOOL_MAIN_MENU"))
+                                List.of(createBtn("🔙 Назад", "tool_menu_main"))
                         ));
                         EditMessageText edit = new EditMessageText();
                         edit.setChatId(String.valueOf(chatId)); edit.setMessageId(messageId);
@@ -1755,6 +1750,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
 
             if (data.startsWith("WH_PAGE:")) {
                 waitingTakeMaterialId.remove(chatId); // 👈 Сброс ожидания ввода текста
+                whTakeSessions.remove(chatId);
                 int page = Integer.parseInt(data.split(":")[1]);
                 sendWarehousePage(chatId, page, messageId, null);
                 return;
@@ -1765,25 +1761,30 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 return;
             }
             if (data.startsWith("WH_TAKE:")) {
-                waitingTakeMaterialId.remove(chatId); // 👈 Сброс ожидания ввода текста
+                waitingTakeMaterialId.remove(chatId);
                 String[] p = data.split(":");
                 int matId = Integer.parseInt(p[1]);
                 double qtyToTake = Double.parseDouble(p[2]);
                 int page = Integer.parseInt(p[3]);
 
                 String resultMsg = DatabaseManager.takeMaterialFromWarehouse(chatId, matId, qtyToTake);
-                sendWarehousePage(chatId, page, messageId, resultMsg);
+                boolean ok = resultMsg.startsWith("✅");
+                if (ok) {
+                    whTakeSessions.remove(chatId);
+                    sendWarehousePage(chatId, page, messageId, resultMsg);
+                }
+                else sendMaterialCard(chatId, matId, page, messageId, resultMsg);
 
                 AnswerCallbackQuery answer = new AnswerCallbackQuery();
                 answer.setCallbackQueryId(update.getCallbackQuery().getId());
-                answer.setText("✅ Успешно! Добавлено в подотчет.");
-                answer.setShowAlert(false);
+                answer.setText(ok ? "✅ Добавлено в подотчет." : "❌ Недостаточно на складе");
+                answer.setShowAlert(!ok);
                 try { execute(answer); } catch (TelegramApiException e) {}
-
                 return;
             }
             if (data.equals("WH_CLOSE")) {
                 waitingTakeMaterialId.remove(chatId); // 👈 Сброс ожидания ввода текста
+                whTakeSessions.remove(chatId);
                 try {
                     DeleteMessage delete = new DeleteMessage(String.valueOf(chatId), messageId);
                     execute(delete);
@@ -2896,6 +2897,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
                         waitingScheduleEditUser.containsKey(chatId) ||
                         waitingScheduleEditDate.containsKey(chatId);
 
+                whTakeSessions.remove(chatId);
                 waitingNameFix.remove(chatId);
                 waitingTakeMaterialId.remove(chatId); writeOffCartSessions.remove(chatId); fileWaitState.remove(chatId);
                 waitingToolWriteOffReason.remove(chatId); waitingOrshPhoto.remove(chatId); waitingOrshProblemReason.remove(chatId);
@@ -2922,6 +2924,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
             }
 
             if (text.startsWith("📦") || text.startsWith("🧰") || text.startsWith("📝") || text.startsWith("📋") || text.startsWith("🔢") || text.startsWith("🤝") || text.startsWith("📊") || text.startsWith("📥") || text.startsWith("📑") || text.startsWith("🗓") || text.startsWith("🔍") || text.startsWith("📢") || text.startsWith("👥") || text.startsWith("🪛") || text.startsWith("🛠") || text.startsWith("📞") || text.startsWith("🔌") || text.startsWith("👁") || text.startsWith("✏️") || text.startsWith("🤒") || text.equals("/start")) {
+                whTakeSessions.remove(chatId);
                 clearChatHistory(chatId);
                 waitingNameFix.remove(chatId);
                 waitingTakeMaterialId.remove(chatId); waitingDirContactCat.remove(chatId); writeOffCartSessions.remove(chatId);
@@ -3280,6 +3283,27 @@ public class WarehouseBot extends TelegramLongPollingBot {
                     SendMessage msg = new SendMessage(String.valueOf(chatId), String.format("🪛 Быстрая выдача: <b>%s</b>\n\n👤 <b>Нажимайте на фамилии сотрудников</b>, чтобы выдать им этот инструмент со склада:", toolName));
                     msg.setParseMode("HTML"); msg.setReplyMarkup(markup); execute(msg);
                 } catch (Exception e) {} return;
+            }
+
+            WhTakeSession whs = whTakeSessions.get(chatId);
+            if (whs != null) {
+                double qty;
+                try {
+                    qty = Double.parseDouble(text.trim().replace(",", "."));
+                    if (qty <= 0) throw new NumberFormatException();
+                } catch (NumberFormatException e) {
+                    sendMaterialCard(chatId, whs.materialId, whs.page, whs.anchorMsgId,
+                            "❌ Введите число больше нуля (например: <code>5</code> или <code>0.5</code>).");
+                    return;
+                }
+                String result = DatabaseManager.takeMaterialFromWarehouse(chatId, whs.materialId, qty);
+                if (result.startsWith("✅")) {
+                    whTakeSessions.remove(chatId);
+                    sendWarehousePage(chatId, whs.page, whs.anchorMsgId, result);
+                } else {
+                    sendMaterialCard(chatId, whs.materialId, whs.page, whs.anchorMsgId, result);
+                }
+                return;
             }
 
             // 👇👇👇 ИСПРАВЛЕННЫЙ БЛОК: ПЕРЕХВАТЧИК КОЛИЧЕСТВА МАТЕРИАЛА 👇👇👇

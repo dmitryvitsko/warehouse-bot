@@ -7,7 +7,7 @@ import java.time.format.TextStyle;
 import java.util.Locale;
 
 public class DatabaseManager {
-    private static final String DB_URL = "jdbc:sqlite:warehouse.db";
+    private static final String DB_URL = "jdbc:sqlite:warehouse.db?journal_mode=WAL&busy_timeout=5000";
 
     public static final long ADMIN_ID = 129265455L;
 
@@ -1062,18 +1062,20 @@ public class DatabaseManager {
 
         try (Connection conn = getConnection();
              PreparedStatement ps = conn.prepareStatement("""
-                         SELECT closing_code, write_off_date FROM write_offs 
-                         WHERE (phone_number = ? OR contract_number = ?) 
-                         AND closing_code != '227' 
-                         AND write_off_date >= date('now', '-6 month') 
-                         ORDER BY write_off_date DESC LIMIT 1
+                         SELECT closing_code, date(created_at, 'localtime') AS d FROM transactions
+                         WHERE type = 'WRITE_OFF' AND is_paid_receipt = 0
+                           AND closing_code != '227'
+                           AND created_at >= datetime('now', '-6 month')
+                           AND ((phone_number = ? AND phone_number NOT IN ('', '-'))
+                             OR (contract_number = ? AND contract_number NOT IN ('', '-')))
+                         ORDER BY created_at DESC LIMIT 1
                      """)) {
             ps.setString(1, phone);
             ps.setString(2, contract);
             ResultSet rs = ps.executeQuery();
             if (rs.next()) {
                 String code = rs.getString("closing_code");
-                String date = rs.getString("write_off_date");
+                String date = rs.getString("d");
                 return "\n\n⚠️ <b>ОСТОРОЖНО:</b> По этому абоненту менее 6 мес. назад уже закрывалась заявка (код " + code + " от " + date + "). <b>Вы обязаны использовать код 227 (любой другой запрещен)!</b>";
             }
         } catch (SQLException e) {
@@ -2884,35 +2886,11 @@ public class DatabaseManager {
                 return "❌ Ошибка при удалении из schedules_v2: " + e.getMessage();
             }
 
-            // 2. Безопасно отвязываем в таблице users (без падения из-за отсутствия колонки)
-            try {
-                List<String> userCols = new ArrayList<>();
-                try (Statement stmt = conn.createStatement();
-                     ResultSet rs = stmt.executeQuery("PRAGMA table_info(users)")) {
-                    while (rs.next()) {
-                        userCols.add(rs.getString("name").toLowerCase());
-                    }
-                }
-
-                // Ищем реальное название колонки с фамилией в users
-                String foundCol = null;
-                for (String col : new String[]{"excel_name", "worker_name", "employee_name", "fio", "name", "full_name"}) {
-                    if (userCols.contains(col)) {
-                        foundCol = col;
-                        break;
-                    }
-                }
-
-                if (foundCol != null) {
-                    String sqlUsers = "UPDATE users SET " + foundCol + " = NULL WHERE " + foundCol + " = ? OR TRIM(" + foundCol + ") = ?";
-                    try (PreparedStatement ps = conn.prepareStatement(sqlUsers)) {
-                        ps.setString(1, excelName);
-                        ps.setString(2, excelName.trim());
-                        usersReset = ps.executeUpdate();
-                    }
-                }
-            } catch (Exception ignored) {
-                // Игнорируем любые нестыковки в users, главное — график очищен
+            // 2. Отвязываем Telegram-аккаунт от фамилии
+            try (PreparedStatement ps = conn.prepareStatement(
+                    "DELETE FROM user_excel_names WHERE TRIM(excel_name) = ?")) {
+                ps.setString(1, excelName.trim());
+                usersReset = ps.executeUpdate();
             }
 
         } catch (SQLException e) {

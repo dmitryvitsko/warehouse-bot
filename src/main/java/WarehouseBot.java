@@ -93,7 +93,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
 
     private final Map<Long, String> waitingScheduleEditUser = new HashMap<>();
     private final Map<Long, String> waitingScheduleEditDate = new HashMap<>();
-    private final Map<Long, Integer> forceWelderReturnIds = new HashMap<>();
+    private final Map<Long, Integer> forceWelderReturnIds = new ConcurrentHashMap<>();
     // Память: кто уже нажал "Оставить на завтра" (чтобы не спамить)
     private final Map<Long, LocalDate> keptWelderForTomorrow = new ConcurrentHashMap<>();
 
@@ -179,7 +179,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 edit.setText(scheduleText); edit.setParseMode("HTML"); edit.setReplyMarkup(markup);
                 execute(edit);
             }
-        } catch (TelegramApiException e) {}
+        } catch (TelegramApiException e) { System.err.println("Telegram: " + e.getMessage()); }
     }
 
     private void sendScheduleMenu(long chatId, String role, String text, Integer messageId) {
@@ -210,7 +210,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 edit.setText(text); edit.setParseMode("HTML"); edit.setReplyMarkup(markup);
                 execute(edit);
             }
-        } catch (TelegramApiException e) {}
+        } catch (TelegramApiException e) { System.err.println("Telegram: " + e.getMessage()); }
     }
 
     private void sendWeldersMenu(long chatId, String role, Integer messageId, String statusMsg) {
@@ -313,7 +313,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
         EditMessageText edit = new EditMessageText();
         edit.setChatId(String.valueOf(chatId)); edit.setMessageId(messageId);
         edit.setText(history); edit.setParseMode("HTML"); edit.setReplyMarkup(markup);
-        try { execute(edit); } catch (TelegramApiException e) {}
+        try { execute(edit); } catch (TelegramApiException e) { System.err.println("Telegram: " + e.getMessage()); }
     }
 
     private void sendWeldersForceAssignMenu(long chatId, int messageId) {
@@ -329,7 +329,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
         edit.setChatId(String.valueOf(chatId)); edit.setMessageId(messageId);
         edit.setText("➕ <b>Принудительная выдача (Шаг 1)</b>\nВыберите свободный сварочник:");
         edit.setParseMode("HTML"); edit.setReplyMarkup(markup);
-        try { execute(edit); } catch (TelegramApiException e) {}
+        try { execute(edit); } catch (TelegramApiException e) { System.err.println("Telegram: " + e.getMessage()); }
     }
 
     private void sendWeldersForceAssignUsers(long chatId, int welderId, int messageId) {
@@ -344,7 +344,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
         edit.setChatId(String.valueOf(chatId)); edit.setMessageId(messageId);
         edit.setText("➕ Принудительная выдача: <b>" + wName + "</b>\n\n👤 <b>Шаг 2: Выберите сотрудника</b>, на которого нужно повесить аппарат:");
         edit.setParseMode("HTML"); edit.setReplyMarkup(markup);
-        try { execute(edit); } catch (TelegramApiException e) {}
+        try { execute(edit); } catch (TelegramApiException e) { System.err.println("Telegram: " + e.getMessage()); }
     }
 
     private void sendWeldersForceReturnMenu(long chatId, int messageId) {
@@ -360,7 +360,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
         edit.setChatId(String.valueOf(chatId)); edit.setMessageId(messageId);
         edit.setText("⚠️ <b>Принудительный возврат на базу</b>\nВыберите аппарат, который хотите списать с сотрудника:");
         edit.setParseMode("HTML"); edit.setReplyMarkup(markup);
-        try { execute(edit); } catch (TelegramApiException e) {}
+        try { execute(edit); } catch (TelegramApiException e) { System.err.println("Telegram: " + e.getMessage()); }
     }
 
     private boolean isAdminBlockedByPendingRequests(long chatId, String role) {
@@ -438,7 +438,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
         if ("NEW_PENDING".equals(role)) {
             sendNewUserRequestToAdmins(chatId, firstName);
             SendMessage msg = new SendMessage(String.valueOf(chatId), "⏳ <b>Ваша заявка отправлена.</b>");
-            msg.setParseMode("HTML"); try { execute(msg); } catch (TelegramApiException e) {}
+            msg.setParseMode("HTML"); try { execute(msg); } catch (TelegramApiException e) { System.err.println("Telegram: " + e.getMessage()); }
             return "PENDING";
         }
         return role;
@@ -449,7 +449,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
         String text = String.format("👤 <b>Новый пользователь!</b>\nИмя: <b>%s</b>\nID: <code>%d</code>", newUserName, newUserId);
         for (Long adminId : DatabaseManager.getAdminIds()) {
             SendMessage msg = new SendMessage(String.valueOf(adminId), text); msg.setParseMode("HTML"); msg.setReplyMarkup(markup);
-            try { execute(msg); } catch (TelegramApiException e) {}
+            try { execute(msg); } catch (TelegramApiException e) { System.err.println("Telegram: " + e.getMessage()); }
         }
     }
 
@@ -475,12 +475,12 @@ public class WarehouseBot extends TelegramLongPollingBot {
         if (messageId == null) {
             SendMessage msg = new SendMessage(String.valueOf(chatId), sb.toString());
             msg.setParseMode("HTML"); msg.setReplyMarkup(markup);
-            try { execute(msg); } catch (TelegramApiException e) {}
+            try { execute(msg); } catch (TelegramApiException e) { System.err.println("Telegram: " + e.getMessage()); }
         } else {
             EditMessageText edit = new EditMessageText();
             edit.setChatId(String.valueOf(chatId)); edit.setMessageId(messageId);
             edit.setText(sb.toString()); edit.setParseMode("HTML"); edit.setReplyMarkup(markup);
-            try { execute(edit); } catch (TelegramApiException e) {}
+            try { execute(edit); } catch (TelegramApiException e) { System.err.println("Telegram: " + e.getMessage()); }
         }
     }
 
@@ -511,12 +511,12 @@ public class WarehouseBot extends TelegramLongPollingBot {
         if (messageId == null) {
             SendMessage msg = new SendMessage(String.valueOf(chatId), sb.toString());
             msg.setParseMode("HTML"); msg.setReplyMarkup(markup);
-            try { execute(msg); } catch (TelegramApiException e) {}
+            try { execute(msg); } catch (TelegramApiException e) { System.err.println("Telegram: " + e.getMessage()); }
         } else {
             EditMessageText edit = new EditMessageText();
             edit.setChatId(String.valueOf(chatId)); edit.setMessageId(messageId);
             edit.setText(sb.toString()); edit.setParseMode("HTML"); edit.setReplyMarkup(markup);
-            try { execute(edit); } catch (TelegramApiException e) {}
+            try { execute(edit); } catch (TelegramApiException e) { System.err.println("Telegram: " + e.getMessage()); }
         }
     }
 
@@ -694,7 +694,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 edit.setText(text); edit.setParseMode("HTML"); edit.setReplyMarkup(markup);
                 execute(edit);
             }
-        } catch (TelegramApiException e) {}
+        } catch (TelegramApiException e) { System.err.println("Telegram: " + e.getMessage()); }
     }
 
     private void sendInventorySection(long chatId, int messageId, String text) {
@@ -741,7 +741,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 edit.setParseMode("HTML"); edit.setReplyMarkup(markup);
                 execute(edit);
             }
-        } catch (TelegramApiException e) {}
+        } catch (TelegramApiException e) { System.err.println("Telegram: " + e.getMessage()); }
     }
 
     private void sendUploadsMenu(long chatId, String text) {
@@ -756,7 +756,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
         SendMessage message = new SendMessage(String.valueOf(chatId), text);
         message.setParseMode("HTML");
         message.setReplyMarkup(markup);
-        try { execute(message); } catch (TelegramApiException e) {}
+        try { execute(message); } catch (TelegramApiException e) { System.err.println("Telegram: " + e.getMessage()); }
     }
 
     private void sendPendingOrshList(long chatId) {
@@ -772,7 +772,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
         rows.add(List.of(createBtn("❌ Закрыть", "GENERIC_CLOSE")));
         markup.setKeyboard(rows);
         SendMessage msg = new SendMessage(String.valueOf(chatId), "📸 <b>Осталось проверить: " + list.size() + " шт.</b>\nВыберите адрес:");
-        msg.setParseMode("HTML"); msg.setReplyMarkup(markup); try { execute(msg); } catch (TelegramApiException e) {}
+        msg.setParseMode("HTML"); msg.setReplyMarkup(markup); try { execute(msg); } catch (TelegramApiException e) { System.err.println("Telegram: " + e.getMessage()); }
     }
 
     private void sendOrshDetails(long chatId, int orshId) {
@@ -785,7 +785,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 List.of(createBtn("❌ Закрыть", "CANCEL_PROMPT"))
         ));
         SendMessage msg = new SendMessage(String.valueOf(chatId), String.format("📸 <b>Выбран ОРШ-%s</b>\n📍 Адрес: %s\n🧭 Местоположение: %s\n\n👇 <b>Отправьте фото!</b>", orsh[0], orsh[1], orsh[2]));
-        msg.setParseMode("HTML"); msg.setReplyMarkup(markup); try { execute(msg); } catch (TelegramApiException e) {}
+        msg.setParseMode("HTML"); msg.setReplyMarkup(markup); try { execute(msg); } catch (TelegramApiException e) { System.err.println("Telegram: " + e.getMessage()); }
     }
     public void sendMenu(long chatId, String role, String text) {
         ReplyKeyboardMarkup keyboardMarkup = new ReplyKeyboardMarkup();
@@ -830,7 +830,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 }
                 if (!remaining.isEmpty()) { SendMessage msg = new SendMessage(String.valueOf(chatId), remaining); msg.setParseMode("HTML"); msg.setReplyMarkup(keyboardMarkup); execute(msg); }
             }
-        } catch (TelegramApiException e) {}
+        } catch (TelegramApiException e) { System.err.println("Telegram: " + e.getMessage()); }
     }
 
     private JSONArray fetchTmTasks(long chatId) {
@@ -879,7 +879,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
         try {
             var sent = execute(msg);
             tmMenuMessageIds.put(chatId, sent.getMessageId()); // 👈 Запоминаем ID сообщения
-        } catch (TelegramApiException e) {}
+        } catch (TelegramApiException e) { System.err.println("Telegram: " + e.getMessage()); }
     }
 
     private void clearPreviousTmTasks(long chatId) {
@@ -942,7 +942,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 var sent = execute(msg);
                 tmOriginalCardText.put(sent.getMessageId(), cardText);
                 newMsgIds.add(sent.getMessageId()); // Запоминаем ID карточки
-            } catch (TelegramApiException e) {}
+            } catch (TelegramApiException e) { System.err.println("Telegram: " + e.getMessage()); }
         }
 
         // 3. Выводим кнопку "Обновить" с количеством заявок и кнопку "Закрыть"
@@ -962,7 +962,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
         try {
             var sentRefresh = execute(refreshMsg);
             newMsgIds.add(sentRefresh.getMessageId()); // Запоминаем ID кнопки обновления
-        } catch (TelegramApiException e) {}
+        } catch (TelegramApiException e) { System.err.println("Telegram: " + e.getMessage()); }
 
         // Сохраняем весь блок сообщений в память бота
         tmActiveTaskMessages.put(chatId, newMsgIds);
@@ -975,7 +975,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
         edit.setText(newText);
         edit.setParseMode("HTML");
         edit.setReplyMarkup(markup);
-        try { execute(edit); } catch (TelegramApiException e) {}
+        try { execute(edit); } catch (TelegramApiException e) { System.err.println("Telegram: " + e.getMessage()); }
     }
 
     private InlineKeyboardMarkup backButtonMarkup(String taskId) {
@@ -1059,7 +1059,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 edit.setText(sb.toString()); edit.setParseMode("HTML"); edit.setReplyMarkup(markup);
                 execute(edit);
             }
-        } catch (TelegramApiException e) {}
+        } catch (TelegramApiException e) { System.err.println("Telegram: " + e.getMessage()); }
     }
 
     // Метод 2: Карточка конкретного материала (Выбор количества)
@@ -1100,11 +1100,20 @@ public class WarehouseBot extends TelegramLongPollingBot {
         EditMessageText edit = new EditMessageText();
         edit.setChatId(String.valueOf(chatId)); edit.setMessageId(messageId);
         edit.setText(sb.toString()); edit.setParseMode("HTML"); edit.setReplyMarkup(markup);
-        try { execute(edit); } catch (TelegramApiException e) {}
+        try { execute(edit); } catch (TelegramApiException e) { System.err.println("Telegram: " + e.getMessage()); }
     }
 
     @Override
     public void onUpdateReceived(Update update) {
+        try {
+            handleUpdate(update);
+        } catch (Exception e) {
+            System.err.println("❌ Ошибка обработки апдейта:");
+            e.printStackTrace();
+        }
+    }
+
+    private void handleUpdate(Update update) {
         if (update.hasMessage() && update.getMessage().hasDocument()) {
             long chatId = update.getMessage().getChatId();
             String firstName = update.getMessage().getFrom().getFirstName();
@@ -1409,7 +1418,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
                     edit.setChatId(String.valueOf(chatId)); edit.setMessageId(messageId);
                     edit.setText("✏️ <b>Редактор графиков</b>\nВыберите сотрудника:");
                     edit.setParseMode("HTML"); edit.setReplyMarkup(markup);
-                    try { execute(edit); } catch (TelegramApiException e) {}
+                    try { execute(edit); } catch (TelegramApiException e) { System.err.println("Telegram: " + e.getMessage()); }
                 }
                 return;
             }
@@ -1666,7 +1675,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
                             try {
                                 SendMessage msg = new SendMessage(String.valueOf(workerId), "⚠ <b>ВНИМАНИЕ: АУДИТ ОСТАТКОВ!</b> ⚠️\n\nНапоминаем о необходимости закрыть подотчет до конца месяца. Пожалуйста, <b>спишите</b> или <b>верните</b> материалы.\n\n" + DatabaseManager.getUserBalanceText(workerId));
                                 msg.setParseMode("HTML"); execute(msg); successCount++;
-                            } catch (TelegramApiException e) {}
+                            } catch (TelegramApiException e) { System.err.println("Telegram: " + e.getMessage()); }
                         }
                         showToolMenuSection(chatId, messageId, "✅ Уведомления об аудите успешно доставлены <b>" + successCount + "</b> сотрудникам!");
                     }
@@ -1779,7 +1788,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 answer.setCallbackQueryId(update.getCallbackQuery().getId());
                 answer.setText(ok ? "✅ Добавлено в подотчет." : "❌ Недостаточно на складе");
                 answer.setShowAlert(!ok);
-                try { execute(answer); } catch (TelegramApiException e) {}
+                try { execute(answer); } catch (TelegramApiException e) { System.err.println("Telegram: " + e.getMessage()); }
                 return;
             }
             if (data.equals("WH_CLOSE")) {
@@ -1788,7 +1797,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 try {
                     DeleteMessage delete = new DeleteMessage(String.valueOf(chatId), messageId);
                     execute(delete);
-                } catch (TelegramApiException e) {}
+                } catch (TelegramApiException e) { System.err.println("Telegram: " + e.getMessage()); }
                 return;
             }
 
@@ -1802,7 +1811,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 answer.setCallbackQueryId(update.getCallbackQuery().getId());
                 answer.setText("⚠️ Сначала выберите фамилию!");
                 answer.setShowAlert(true);
-                try { execute(answer); } catch (TelegramApiException e) {}
+                try { execute(answer); } catch (TelegramApiException e) { System.err.println("Telegram: " + e.getMessage()); }
                 return;
             }
 
@@ -1817,7 +1826,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
 
                 if (req == null || !"PENDING".equals(req[4])) {
                     answer.setText("Запрос уже обработан или не найден.");
-                    try { execute(answer); } catch (TelegramApiException e) {}
+                    try { execute(answer); } catch (TelegramApiException e) { System.err.println("Telegram: " + e.getMessage()); }
                     return;
                 }
 
@@ -1852,9 +1861,9 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 edit.setText((approve ? "✅ Подтверждено: " : "❌ Отклонено: ") + excelName + ", " + displayDate);
                 // 👇 ДОБАВЛЕНА ЭТА СТРОКА:
                 edit.setReplyMarkup(new InlineKeyboardMarkup(List.of(List.of(createBtn("❌ Закрыть", "GENERIC_CLOSE")))));
-                try { execute(edit); } catch (TelegramApiException e) {}
+                try { execute(edit); } catch (TelegramApiException e) { System.err.println("Telegram: " + e.getMessage()); }
 
-                try { execute(answer); } catch (TelegramApiException e) {}
+                try { execute(answer); } catch (TelegramApiException e) { System.err.println("Telegram: " + e.getMessage()); }
                 return;
             }
 
@@ -1880,7 +1889,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
 
                 AnswerCallbackQuery answer = new AnswerCallbackQuery();
                 answer.setCallbackQueryId(update.getCallbackQuery().getId());
-                try { execute(answer); } catch (TelegramApiException e) {}
+                try { execute(answer); } catch (TelegramApiException e) { System.err.println("Telegram: " + e.getMessage()); }
                 return;
             }
 
@@ -1904,7 +1913,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 sendTmInProgressList(chatId, role, tasks);
                 AnswerCallbackQuery answer = new AnswerCallbackQuery();
                 answer.setCallbackQueryId(update.getCallbackQuery().getId());
-                try { execute(answer); } catch (TelegramApiException e) {}
+                try { execute(answer); } catch (TelegramApiException e) { System.err.println("Telegram: " + e.getMessage()); }
                 return;
             }
             if ("TM_CLOSED".equals(data)) {
@@ -1913,7 +1922,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 sendClosableMessage(chatId, TmClient.formatTasksText(tasks, true));
                 AnswerCallbackQuery answer = new AnswerCallbackQuery();
                 answer.setCallbackQueryId(update.getCallbackQuery().getId());
-                try { execute(answer); } catch (TelegramApiException e) {}
+                try { execute(answer); } catch (TelegramApiException e) { System.err.println("Telegram: " + e.getMessage()); }
                 return;
             }
             if (data.equals("TM_REP_CANCEL")) {
@@ -1925,7 +1934,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
 
                 AnswerCallbackQuery answer = new AnswerCallbackQuery();
                 answer.setCallbackQueryId(update.getCallbackQuery().getId());
-                try { execute(answer); } catch (TelegramApiException e) {}
+                try { execute(answer); } catch (TelegramApiException e) { System.err.println("Telegram: " + e.getMessage()); }
                 return;
             }
 
@@ -1963,7 +1972,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
 
                 AnswerCallbackQuery answer = new AnswerCallbackQuery();
                 answer.setCallbackQueryId(update.getCallbackQuery().getId());
-                try { execute(answer); } catch (TelegramApiException e) {}
+                try { execute(answer); } catch (TelegramApiException e) { System.err.println("Telegram: " + e.getMessage()); }
                 return;
             }
 
@@ -2156,7 +2165,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 editTmCardMessage(chatId, messageId, TmClient.formatAstup(astup), backButtonMarkup(taskId));
                 AnswerCallbackQuery answer = new AnswerCallbackQuery();
                 answer.setCallbackQueryId(update.getCallbackQuery().getId());
-                try { execute(answer); } catch (TelegramApiException e) {}
+                try { execute(answer); } catch (TelegramApiException e) { System.err.println("Telegram: " + e.getMessage()); }
                 return;
             }
             if (data.startsWith("TM_PARAMS:")) {
@@ -2166,7 +2175,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 editTmCardMessage(chatId, messageId, TmClient.formatParams(params), backButtonMarkup(taskId));
                 AnswerCallbackQuery answer = new AnswerCallbackQuery();
                 answer.setCallbackQueryId(update.getCallbackQuery().getId());
-                try { execute(answer); } catch (TelegramApiException e) {}
+                try { execute(answer); } catch (TelegramApiException e) { System.err.println("Telegram: " + e.getMessage()); }
                 return;
             }
             if (data.startsWith("TM_HIST:")) {
@@ -2176,7 +2185,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 editTmCardMessage(chatId, messageId, TmClient.formatHistory(histObj, taskId), backButtonMarkup(taskId));
                 AnswerCallbackQuery answer = new AnswerCallbackQuery();
                 answer.setCallbackQueryId(update.getCallbackQuery().getId());
-                try { execute(answer); } catch (TelegramApiException e) {}
+                try { execute(answer); } catch (TelegramApiException e) { System.err.println("Telegram: " + e.getMessage()); }
                 return;
             }
             if (data.startsWith("TM_BACK:")) {
@@ -2235,7 +2244,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
 
                 AnswerCallbackQuery answer = new AnswerCallbackQuery();
                 answer.setCallbackQueryId(update.getCallbackQuery().getId());
-                try { execute(answer); } catch (TelegramApiException e) {}
+                try { execute(answer); } catch (TelegramApiException e) { System.err.println("Telegram: " + e.getMessage()); }
                 return;
             }
             if (data.startsWith("MY_SCHED:")) {
@@ -2541,7 +2550,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 AnswerCallbackQuery answer = new AnswerCallbackQuery();
                 answer.setCallbackQueryId(update.getCallbackQuery().getId());
                 answer.setText(res[1]); answer.setShowAlert(false);
-                try { execute(answer); } catch (TelegramApiException e) {}
+                try { execute(answer); } catch (TelegramApiException e) { System.err.println("Telegram: " + e.getMessage()); }
                 if ("OK".equals(res[0])) sendDirectNotification(Long.parseLong(data.split(":")[2]), res[2]);
                 return;
             }
@@ -2625,7 +2634,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
                     edit.setText(DatabaseManager.generateReceiptText(s));
                     edit.setParseMode("HTML");
                     edit.setReplyMarkup(markup);
-                    try { execute(edit); } catch (TelegramApiException e) {}
+                    try { execute(edit); } catch (TelegramApiException e) { System.err.println("Telegram: " + e.getMessage()); }
 
                     receiptSessions.remove(chatId);
 
@@ -2641,7 +2650,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 EditMessageText edit = new EditMessageText();
                 edit.setChatId(String.valueOf(chatId)); edit.setMessageId(messageId);
                 edit.setText("🗑 Корзина очищена.");
-                try { execute(edit); } catch (TelegramApiException e) {}
+                try { execute(edit); } catch (TelegramApiException e) { System.err.println("Telegram: " + e.getMessage()); }
                 return;
             }
 
@@ -2675,7 +2684,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
                         double qty = Double.parseDouble(data.split(":")[1]);
                         String result = DatabaseManager.takeMaterialFromWarehouse(chatId, waitingTakeMaterialId.get(chatId), qty);
                         if (result.startsWith("✅")) { waitingTakeMaterialId.remove(chatId); sendMenu(chatId, role, result); }
-                        else { SendMessage msg = new SendMessage(String.valueOf(chatId), result); msg.setParseMode("HTML"); try { execute(msg); } catch (TelegramApiException e) {} }
+                        else { SendMessage msg = new SendMessage(String.valueOf(chatId), result); msg.setParseMode("HTML"); try { execute(msg); } catch (TelegramApiException e) { System.err.println("Telegram: " + e.getMessage()); } }
                     } catch (Exception e) {}
                 } else sendMenu(chatId, role, "❌ Ошибка: вы не выбрали материал.");
                 return;
@@ -2753,7 +2762,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 EditMessageText edit = new EditMessageText();
                 edit.setChatId(String.valueOf(chatId)); edit.setMessageId(messageId);
                 edit.setText(text); edit.setParseMode("HTML"); edit.setReplyMarkup(inlineMarkup);
-                try { execute(edit); } catch (TelegramApiException e) {} return;
+                try { execute(edit); } catch (TelegramApiException e) { System.err.println("Telegram: " + e.getMessage()); } return;
             }
 
             if (data.startsWith("WO_Q:") && writeOffCartSessions.containsKey(chatId)) {
@@ -3213,7 +3222,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
                         for (Long adminId : DatabaseManager.getAdminIds()) {
                             SendMessage msg = new SendMessage(String.valueOf(adminId), adminMsg);
                             msg.setParseMode("HTML"); msg.setReplyMarkup(approvalMarkup);
-                            try { execute(msg); } catch (TelegramApiException e) {}
+                            try { execute(msg); } catch (TelegramApiException e) { System.err.println("Telegram: " + e.getMessage()); }
                         }
                     }
 
@@ -3252,7 +3261,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
                         markup.setKeyboard(rows);
                         SendMessage msg = new SendMessage(String.valueOf(targetId), "⚠️ <b>Внимание! Требование Администратора:</b>\n\nВам необходимо идентифицировать себя в системе, чтобы ваш аккаунт не был заблокирован.\n\n👇 <b>Пожалуйста, выберите СВОЮ настоящую фамилию из списка ниже:</b>");
                         msg.setParseMode("HTML"); msg.setReplyMarkup(markup);
-                        try { execute(msg); } catch (TelegramApiException e) {}
+                        try { execute(msg); } catch (TelegramApiException e) { System.err.println("Telegram: " + e.getMessage()); }
                     }
                 } else sendMenu(chatId, role, "❌ Ошибка: пользователь не найден в базе данных.");
                 return;
@@ -3260,7 +3269,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
 
             if (forceWelderReturnIds.containsKey(chatId)) {
                 SendMessage blockMsg = new SendMessage(String.valueOf(chatId), "⚠️ <b>ДОСТУП ЗАБЛОКИРОВАН!</b>\n\nУ вас висит необработанный запрос по возврату сварочного аппарата: <b>" + DatabaseManager.getWelderNameById(forceWelderReturnIds.get(chatId)) + "</b>.\n\nПоднимитесь чуть выше в истории чата и нажмите одну из кнопок под сообщением-напоминанием!");
-                blockMsg.setParseMode("HTML"); try { execute(blockMsg); } catch (TelegramApiException e) {} return;
+                blockMsg.setParseMode("HTML"); try { execute(blockMsg); } catch (TelegramApiException e) { System.err.println("Telegram: " + e.getMessage()); } return;
             }
 
             if (!text.equals("/start") && !text.equals("/fix") && !text.startsWith("/take_") && !text.startsWith("/give_") && !text.startsWith("/fix_name")) {
@@ -3312,7 +3321,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
                     double qty = Double.parseDouble(text.trim().replace(",", "."));
                     String result = DatabaseManager.takeMaterialFromWarehouse(chatId, waitingTakeMaterialId.get(chatId), qty);
                     if (result.startsWith("✅")) { waitingTakeMaterialId.remove(chatId); sendMenu(chatId, role, result); }
-                    else { SendMessage msg = new SendMessage(String.valueOf(chatId), result); msg.setParseMode("HTML"); try { execute(msg); } catch (TelegramApiException e) {} }
+                    else { SendMessage msg = new SendMessage(String.valueOf(chatId), result); msg.setParseMode("HTML"); try { execute(msg); } catch (TelegramApiException e) { System.err.println("Telegram: " + e.getMessage()); } }
                 } catch (NumberFormatException e) { sendCancelKeyboard(chatId, "❌ Введите корректное число (например: <code>5</code> или <code>0.05</code>)."); }
                 return; // 👈 Выходим, чтобы текст не пошел в switch и не запустил глобальный поиск!
             }
@@ -3360,7 +3369,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 String broadcastMsg = "📢 <b>ИНФОРМАЦИЯ ОТ РУКОВОДИТЕЛЯ:</b>\n\n" + text;
                 for (Long userId : allUsers) {
                     if (userId == chatId) continue;
-                    try { SendMessage msg = new SendMessage(String.valueOf(userId), broadcastMsg); msg.setParseMode("HTML"); execute(msg); successCount++; } catch (TelegramApiException e) {}
+                    try { SendMessage msg = new SendMessage(String.valueOf(userId), broadcastMsg); msg.setParseMode("HTML"); execute(msg); successCount++; } catch (TelegramApiException e) { System.err.println("Telegram: " + e.getMessage()); }
                 }
                 sendMenu(chatId, role, "✅ Рассылка успешно доставлена <b>" + successCount + "</b> сотрудникам!"); return;
             }
@@ -3488,7 +3497,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
                                 List.of(createBtn("📅 " + getMonthName(next2.getMonthValue()) + " " + next2.getYear(), "UPL_SCHED:" + next2.getYear() + ":" + next2.getMonthValue()))
                         ));
                         SendMessage msg = new SendMessage(String.valueOf(chatId), "🗓 <b>На какой месяц вы загружаете график?</b>\nВыберите из списка:");
-                        msg.setParseMode("HTML"); msg.setReplyMarkup(markup); try { execute(msg); } catch (TelegramApiException e) {}
+                        msg.setParseMode("HTML"); msg.setReplyMarkup(markup); try { execute(msg); } catch (TelegramApiException e) { System.err.println("Telegram: " + e.getMessage()); }
                     }
                 }
                 case "📊 У кого что на руках" -> { if (role.equals("ADMIN")) sendClosableMessage(chatId, DatabaseManager.getAllWorkersBalancesText()); }
@@ -3562,7 +3571,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
         markup.setKeyboard(rows);
         SendMessage msg = new SendMessage(String.valueOf(chatId), getDirectoryText());
         msg.setParseMode("HTML"); msg.setReplyMarkup(markup);
-        try { execute(msg); } catch (TelegramApiException e) {}
+        try { execute(msg); } catch (TelegramApiException e) { System.err.println("Telegram: " + e.getMessage()); }
     }
 
     private void sendDirectoryAddMenu(long chatId) {
@@ -3577,7 +3586,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
         ));
         SendMessage msg = new SendMessage(String.valueOf(chatId), "➕ <b>В какой раздел добавить контакт?</b>\nВыберите категорию ниже:");
         msg.setParseMode("HTML"); msg.setReplyMarkup(markup);
-        try { execute(msg); } catch (TelegramApiException e) {}
+        try { execute(msg); } catch (TelegramApiException e) { System.err.println("Telegram: " + e.getMessage()); }
     }
 
     private void sendDirectoryDelMenu(long chatId) {
@@ -3590,14 +3599,14 @@ public class WarehouseBot extends TelegramLongPollingBot {
         markup.setKeyboard(rows);
         SendMessage msg = new SendMessage(String.valueOf(chatId), "🗑 <b>Удаление контакта</b>\nНажмите на контакт, который хотите удалить:");
         msg.setParseMode("HTML"); msg.setReplyMarkup(markup);
-        try { execute(msg); } catch (TelegramApiException e) {}
+        try { execute(msg); } catch (TelegramApiException e) { System.err.println("Telegram: " + e.getMessage()); }
     }
 
     private void notifyAdminsForAction(long excludeChatId, String text) {
         for (Long adminId : DatabaseManager.getAdminIds()) {
             if (adminId == excludeChatId) continue;
             SendMessage msg = new SendMessage(String.valueOf(adminId), text);
-            msg.setParseMode("HTML"); try { execute(msg); } catch (TelegramApiException e) {}
+            msg.setParseMode("HTML"); try { execute(msg); } catch (TelegramApiException e) { System.err.println("Telegram: " + e.getMessage()); }
         }
     }
 
@@ -3608,14 +3617,14 @@ public class WarehouseBot extends TelegramLongPollingBot {
         markup.setKeyboard(rows);
         SendMessage msg = new SendMessage(String.valueOf(chatId), "👤 <b>Вы еще не привязаны к графику.</b>\nВыберите вашу фамилию:");
         msg.setParseMode("HTML"); msg.setReplyMarkup(markup);
-        try { execute(msg); } catch (TelegramApiException e) {}
+        try { execute(msg); } catch (TelegramApiException e) { System.err.println("Telegram: " + e.getMessage()); }
     }
 
     private void sendCancelKeyboard(long chatId, String text) {
         InlineKeyboardMarkup markup = new InlineKeyboardMarkup(List.of(List.of(createBtn("❌ Отменить", "CANCEL_PROMPT"))));
         SendMessage message = new SendMessage(String.valueOf(chatId), text);
         message.setParseMode("HTML"); message.setReplyMarkup(markup);
-        try { execute(message); } catch (TelegramApiException e) {}
+        try { execute(message); } catch (TelegramApiException e) { System.err.println("Telegram: " + e.getMessage()); }
     }
 
     private void handleWriteOffStep(long chatId, String firstName, String role, String text) {
@@ -3685,13 +3694,13 @@ public class WarehouseBot extends TelegramLongPollingBot {
         String alertMsg = "🚨 <b>ТРЕБУЕТСЯ ВАШЕ РАЗРЕШЕНИЕ!</b> 🚨\n\n" + text;
         for (Long adminId : DatabaseManager.getAdminIds()) {
             SendMessage msg = new SendMessage(String.valueOf(adminId), alertMsg);
-            msg.setParseMode("HTML"); msg.setReplyMarkup(markup); try { execute(msg); } catch (TelegramApiException e) {}
+            msg.setParseMode("HTML"); msg.setReplyMarkup(markup); try { execute(msg); } catch (TelegramApiException e) { System.err.println("Telegram: " + e.getMessage()); }
         }
     }
 
     private void sendDirectNotification(long targetChatId, String text) {
         SendMessage msg = new SendMessage(String.valueOf(targetChatId), text);
-        msg.setParseMode("HTML"); try { execute(msg); } catch (TelegramApiException e) {}
+        msg.setParseMode("HTML"); try { execute(msg); } catch (TelegramApiException e) { System.err.println("Telegram: " + e.getMessage()); }
     }
 
     private void startWriteOffMenu(long chatId, String role) {
@@ -3755,7 +3764,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 edit.setText(sb.toString()); edit.setParseMode("HTML"); edit.setReplyMarkup(markup);
                 execute(edit);
             }
-        } catch (TelegramApiException e) {}
+        } catch (TelegramApiException e) { System.err.println("Telegram: " + e.getMessage()); }
     }
 
     private void updateWriteOffUI(long chatId, Integer messageId, String text) {
@@ -3841,7 +3850,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 edit.setText(sb.toString()); edit.setParseMode("HTML"); edit.setReplyMarkup(markup);
                 execute(edit);
             }
-        } catch (TelegramApiException e) {}
+        } catch (TelegramApiException e) { System.err.println("Telegram: " + e.getMessage()); }
     }
 
     private void sendServiceSelectionForCart(long chatId, int messageId) {
@@ -3856,7 +3865,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
         edit.setChatId(String.valueOf(chatId)); edit.setMessageId(messageId);
         edit.setText("🛠 <b>Выберите выполненную услугу:</b>");
         edit.setParseMode("HTML"); edit.setReplyMarkup(markup);
-        try { execute(edit); } catch (TelegramApiException e) {}
+        try { execute(edit); } catch (TelegramApiException e) { System.err.println("Telegram: " + e.getMessage()); }
     }
 
     private void sendMaterialSelectionForCart(long chatId, String role, int messageId) {
@@ -3876,13 +3885,13 @@ public class WarehouseBot extends TelegramLongPollingBot {
         edit.setChatId(String.valueOf(chatId)); edit.setMessageId(messageId);
         edit.setText("📦 <b>Выберите использованный материал:</b>");
         edit.setParseMode("HTML"); edit.setReplyMarkup(markup);
-        try { execute(edit); } catch (TelegramApiException e) {}
+        try { execute(edit); } catch (TelegramApiException e) { System.err.println("Telegram: " + e.getMessage()); }
     }
 
     private void sendWarehouseChunk(long chatId, String text, List<List<InlineKeyboardButton>> rows) {
         InlineKeyboardMarkup inlineMarkup = new InlineKeyboardMarkup(); inlineMarkup.setKeyboard(rows);
         SendMessage msg = new SendMessage(String.valueOf(chatId), text); msg.setParseMode("HTML"); msg.setReplyMarkup(inlineMarkup);
-        try { execute(msg); } catch (TelegramApiException e) {}
+        try { execute(msg); } catch (TelegramApiException e) { System.err.println("Telegram: " + e.getMessage()); }
     }
 
     private void handleUpdateService(long chatId, String role, String text) {
@@ -4018,7 +4027,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
                     SendMessage msg = new SendMessage(String.valueOf(chatId), remaining); msg.setParseMode("HTML"); msg.setReplyMarkup(markup); execute(msg);
                 }
             }
-        } catch (TelegramApiException e) {}
+        } catch (TelegramApiException e) { System.err.println("Telegram: " + e.getMessage()); }
     }
 
     private void sendMaterialSelectionForReport(long chatId, TmReportSession session, Integer messageId) {
@@ -4074,7 +4083,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 edit.setText(sb.toString()); edit.setParseMode("HTML"); edit.setReplyMarkup(markup);
                 execute(edit);
             }
-        } catch (TelegramApiException e) {}
+        } catch (TelegramApiException e) { System.err.println("Telegram: " + e.getMessage()); }
     }
 
     private void showTmReportPreview(long chatId, TmReportSession session, Integer messageId) {
@@ -4229,7 +4238,7 @@ public class WarehouseBot extends TelegramLongPollingBot {
                 edit.setText(text); edit.setParseMode("HTML"); edit.setReplyMarkup(markup);
                 execute(edit);
             }
-        } catch (TelegramApiException e) {}
+        } catch (TelegramApiException e) { System.err.println("Telegram: " + e.getMessage()); }
     }
 
     // Метод для уведомления ответственных за график (Козлов и Белевич)

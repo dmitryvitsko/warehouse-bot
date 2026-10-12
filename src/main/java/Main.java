@@ -5,6 +5,10 @@ import org.telegram.telegrambots.meta.api.methods.send.SendMessage;
 import org.telegram.telegrambots.meta.api.objects.replykeyboard.InlineKeyboardMarkup;
 import org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton;
 
+import java.io.File;
+import java.sql.Statement;
+import org.telegram.telegrambots.meta.api.methods.send.SendDocument;
+import org.telegram.telegrambots.meta.api.objects.InputFile;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -30,6 +34,7 @@ public class Main {
 
             // 3. Запуск фонового Бота-надзирателя
             startWelderMonitor(bot);
+            startDailyBackup(bot);
 
         } catch (TelegramApiException e) {
             e.printStackTrace();
@@ -157,5 +162,27 @@ public class Main {
         } catch (Exception e) {
             return null;
         }
+    }
+
+    /**
+     * Раз в сутки делает копию warehouse.db и присылает её админу в Telegram.
+     */
+    private static void startDailyBackup(WarehouseBot bot) {
+        Executors.newSingleThreadScheduledExecutor().scheduleAtFixedRate(() -> {
+            try {
+                File backup = new File("backup_" + LocalDate.now() + ".db");
+                backup.delete();
+                try (Connection c = DatabaseManager.getConnection(); Statement s = c.createStatement()) {
+                    s.execute("VACUUM INTO '" + backup.getName() + "'");
+                }
+                SendDocument doc = new SendDocument();
+                doc.setChatId(String.valueOf(DatabaseManager.ADMIN_ID));
+                doc.setDocument(new InputFile(backup));
+                bot.execute(doc);
+                backup.delete();
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
+        }, 1, 24, TimeUnit.HOURS);
     }
 }

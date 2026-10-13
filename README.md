@@ -56,7 +56,7 @@
 
 ## 🛠 Технологический стек и инструменты
 
-* **Язык программирования:** Java (JDK 17+)
+* **Язык программирования:** Java (JDK 21+)
 * **Система сборки:** Apache Maven
 * **Telegram API:** TelegramBots (Long Polling Bot, Reply & Inline Keyboards, State Machine)
 * **База данных:** SQLite (`sqlite-jdbc`)
@@ -64,36 +64,83 @@
 * **Интеграция:** JavaMail API — отправка отчетов на почту.
 * **Логирование:** SLF4J (`slf4j-simple`)
 
-## 🗄 Архитектура проекта и базы данных
+## 🗄 Архитектура проекта
 
-Проект имеет модульную структуру (`src/main/java`):
-* `Main.java` — точка входа, инициализация БД.
-* `WarehouseBot.java` — контроллер бота, маршрутизация команд, UI.
-* `DatabaseManager.java` — слой работы с БД (DAO).
-* `ExcelImporter.java` / `ExcelReportGenerator.java` — парсинг и генерация.
+Код разделён на слои (`src/main/java/com/warehousebot`):
 
-**Схема базы данных (`warehouse.db`) включает 9 таблиц:** `users`, `materials`, `employee_balances`, `tools`, `transactions`, `return_requests`, `service_tariffs`, `schedules` (+ `user_excel_names`), `orsh_inspections`.
+```
+App, AppContext, Feature        точка входа и сборка приложения
+config/AppConfig                чтение config.properties
+domain/                         записи предметной области (Material, Tool, Welder, Role, …)
+repository/                     SQL-запросы к SQLite, без логики и без Telegram
+service/                        бизнес-правила и транзакции (склад, инструмент, график, ТМ, …)
+infrastructure/
+  db/                           пул соединений, транзакции, создание схемы
+  excel/                        разбор загружаемых Excel и запись отчёта
+  mail/                         отправка писем
+  tm/                           HTTP-клиент «Мобильной ТМ»
+bot/
+  core/                         маршрутизация, контексты, отправка сообщений, очередь обработки
+  session/                      состояние диалогов пользователя
+  common/                       главное меню, проверки доступа, общие экраны
+  feature/<функция>/            модули Telegram-интерфейса: Module (кнопки и команды) + View (тексты)
+```
+
+Функции: `stock` (склад, списание, возвраты, калькулятор, тарифы, отчёт), `tools` (инструмент),
+`welders` (сварочные аппараты и контроль конца смены), `schedule` (графики и больничные), `tm` (заявки ТМ),
+`admin` (пользователи, загрузки Excel, резервная копия), `orsh` (осмотры ОРШ), `directory`, `reference`, `inventory`.
+
+**Как добавить новую функцию:** создать модуль `bot/feature/<имя>/XxxModule implements BotModule`,
+зарегистрировать в нём кнопки (`routes.onCallback/onCallbackPrefix`), команды (`routes.onCommand`)
+и шаги диалога (`routes.onText(TextStage…)`), а состояние хранить в `SessionKey` своего модуля.
+Подключить модуль в `App.createFeatures`.
+
+**Производительность:**
+* апдейты разных пользователей обрабатываются параллельно, сообщения одного пользователя — строго по порядку;
+  медленный сервер ТМ, почта или импорт Excel больше не «замораживают» бота для всех;
+* постоянный пул соединений SQLite (WAL, `synchronous=NORMAL`), индексы на частые запросы;
+* операции с остатками и статусами атомарны (`BEGIN IMMEDIATE` + условные `UPDATE`) — параллельные нажатия
+  не приводят к отрицательным остаткам или двойной выдаче.
+
+**База данных `warehouse.db`** (16 таблиц, схема создаётся автоматически при первом запуске и совместима с прежними версиями):
+`users`, `user_excel_names`, `materials`, `employee_balances`, `transactions`, `return_requests`, `service_tariffs`,
+`tools`, `welders`, `welders_history`, `schedules_v2`, `schedules` (устаревшая), `sick_leave_requests`,
+`orsh_inspections`, `directory_contacts`, `tm_accounts`.
 
 ## 🚀 Быстрый запуск и настройка
 
 1. **Клонируйте репозиторий:**
    ```bash
-   git clone [https://github.com/ВАШ_ЛОГИН/warehouse-bot.git](https://github.com/ВАШ_ЛОГИН/warehouse-bot.git)
+   git clone https://github.com/ВАШ_ЛОГИН/warehouse-bot.git
    cd warehouse-bot
+   ```
 
 2. **Создайте файл конфигурации `config.properties` в корне проекта:**
    *(Файл добавлен в `.gitignore` в целях безопасности и не публикуется в репозитории)*
    ```properties
    bot.token=ВАШ_ТОКЕН_ОТ_BOTFATHER
    bot.username=ИМЯ_ВАШЕГО_БОТА
+
+   # Необязательные параметры (в .properties комментарий — только на отдельной строке)
+   # Telegram ID главного администратора (МОЛ)
+   bot.admin.id=129265455
+   # API «Мобильной ТМ»
+   tm.api.url=https://…
+   # Почта для отчётов (smtp.yandex.ru)
+   bot.email.login=…
+   bot.email.password=…
+   bot.email.target=…
+   # Сколько пользователей обслуживаются параллельно и размер пула соединений с БД
+   bot.worker.threads=16
+   db.pool.size=8
    ```
 
-3. **Укажите свой Telegram ID администратора:**
-   В классе `DatabaseManager.java` укажите ваш `ADMIN_ID`, чтобы бот автоматически предоставил вам права МОЛ.
-
-4. **Соберите и запустите проект:**
-   Запустите класс `Main.java` из IntelliJ IDEA или через консоль Maven:
+3. **Соберите и запустите проект (JDK 21+):**
    ```bash
-   mvn compile exec:java -Dexec.mainClass="Main"
+   mvn package
+   java -jar target/warehouse-bot-1.0-SNAPSHOT.jar
    ```
    При первом запуске база данных `warehouse.db` и все необходимые таблицы создадутся автоматически.
+   Существующая база подхватывается без изменений.
+
+4. **Тесты:** `mvn test`.

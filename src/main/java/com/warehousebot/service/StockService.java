@@ -124,6 +124,145 @@ public final class StockService implements StockFacade {
         }
     }
 
+    /** Результат пополнения или добавления материала на склад (включает текст для общей рассылки). */
+    public record StockUpdateResult(boolean ok, String adminText, String broadcastText) {
+    }
+
+    /** Пополнение существующего материала на складе (приход по накладной в середине месяца). */
+    public StockUpdateResult replenishStock(int materialId, double addQty) {
+        if (!(addQty > 0)) return new StockUpdateResult(false, "❌ Количество должно быть больше нуля!", null);
+        try {
+            return db.inTransaction(() -> {
+                Optional<Material> found = materials.findById(materialId);
+                if (found.isEmpty()) return new StockUpdateResult(false, "❌ Материал не найден.", null);
+                Material m = found.get();
+                materials.addStockAndPrice(materialId, addQty, m.priceWithVat());
+                double newTotal = m.warehouseQty() + addQty;
+                String unit = Html.esc(m.unit());
+
+                String adminMsg = String.format("""
+                        ✅ <b>Остаток на складе пополнен!</b>
+                        • Наименование: <b>%s</b> [<code>%s</code>]
+                        • Добавлено: <b>+%s %s</b>
+                        • Теперь на складе: <b>%s %s</b>""",
+                        Html.esc(m.name()), Html.esc(m.code()), qty(addQty), unit, qty(newTotal), unit);
+
+                String broadcastMsg = String.format("""
+                        📦 <b>Пополнение на складе!</b>
+                        
+                        • Материал: <b>%s</b>
+                        • Инв. №: <code>%s</code>
+                        • Поступило: <b>+%s %s</b>
+                        • Доступно на складе: <b>%s %s</b>""",
+                        Html.esc(m.name()), Html.esc(m.code()), qty(addQty), unit, qty(newTotal), unit);
+
+                return new StockUpdateResult(true, adminMsg, broadcastMsg);
+            });
+        } catch (DataAccessException e) {
+            log.error("Ошибка пополнения материала {}", materialId, e);
+            return new StockUpdateResult(false, "❌ Ошибка базы данных при пополнении.", null);
+        }
+    }
+
+    /** Передача материала со склада в другое подразделение по накладной (простое уменьшение остатка склада). */
+    public TakeResult transferOutFromWarehouse(int materialId, double qtyToRemove) {
+        if (!(qtyToRemove > 0)) return new TakeResult(false, "❌ Количество должно быть больше нуля!");
+        try {
+            return db.inTransaction(() -> {
+                Optional<Material> found = materials.findById(materialId);
+                if (found.isEmpty()) return new TakeResult(false, "❌ Материал не найден.");
+                Material m = found.get();
+                if (qtyToRemove > m.warehouseQty() + 1e-9 || !materials.decreaseStock(materialId, qtyToRemove)) {
+                    return new TakeResult(false, String.format("❌ На складе недостаточно материала! Доступно всего: <b>%s %s</b>",
+                            qty(m.warehouseQty()), Html.esc(m.unit())));
+                }
+                double left = Math.max(0.0, m.warehouseQty() - qtyToRemove);
+                String unit = Html.esc(m.unit());
+                return new TakeResult(true, String.format("""
+                        📤 <b>Материал списан со склада (передан по накладной):</b>
+                        • Наименование: <b>%s</b> [<code>%s</code>]
+                        • Передано: <b>%s %s</b>
+                        • Остаток на складе: <b>%s %s</b>""",
+                        Html.esc(m.name()), Html.esc(m.code()), qty(qtyToRemove), unit, qty(left), unit));
+            });
+        } catch (DataAccessException e) {
+            log.error("Ошибка списания материала {} со склада", materialId, e);
+            return new TakeResult(false, "❌ Ошибка базы данных при списании со склада.");
+        }
+    }
+
+    /**
+     * Добавление новой позиции (или пополнение существующей по инв. номеру) вручную без загрузки Excel.
+     * Формат строки: Счёт; Инв.номер; Наименование; Ед.изм; ЦенаСНДС; Количество
+     */
+    public StockUpdateResult addOrUpdateMaterialManual(String rawInput) {
+        String[] parts = rawInput.split(";");
+        if (parts.length < 6) {
+            return new StockUpdateResult(false, "❌ <b>Неверный формат!</b> Нужно 6 параметров через точку с запятой (<code>;</code>).", null);
+        }
+        String account = parts[0].trim();
+        String code = parts[1].trim();
+        String name = parts[2].trim();
+        String unit = parts[3].trim();
+        double priceVat;
+        double addQty;
+        try {
+            priceVat = Double.parseDouble(parts[4].trim().replace(",", "."));
+            addQty = Double.parseDouble(parts[5].trim().replace(",", "."));
+            if (priceVat < 0 || !(addQty > 0)) throw new NumberFormatException();
+        } catch (NumberFormatException e) {
+            return new StockUpdateResult(false, "❌ Ошибка в цене или количестве! Введите корректные числа.", null);
+        }
+
+        try {
+            return db.inTransaction(() -> {
+                Optional<Material> existing = materials.findByCode(code);
+                String escUnit = Html.esc(unit);
+                if (existing.isPresent()) {
+                    Material m = existing.get();
+                    materials.addStockAndPrice(m.id(), addQty, priceVat);
+                    double newTotal = m.warehouseQty() + addQty;
+                    String adminMsg = String.format("""
+                            ✅ <b>Материал с инв. № <code>%s</code> уже был в базе — остаток обновлен!</b>
+                            • Наименование: <b>%s</b>
+                            • Добавлено: <b>+%s %s</b>
+                            • Итого на складе: <b>%s %s</b> (цена: %s руб.)""",
+                            Html.esc(code), Html.esc(m.name()), qty(addQty), Html.esc(m.unit()), qty(newTotal), Html.esc(m.unit()), price(priceVat));
+                    String broadcastMsg = String.format("""
+                            📦 <b>Обновление на складе!</b>
+                            
+                            • Материал: <b>%s</b> [<code>%s</code>]
+                            • Поступило: <b>+%s %s</b>
+                            • Доступно на складе: <b>%s %s</b>""",
+                            Html.esc(m.name()), Html.esc(code), qty(addQty), Html.esc(m.unit()), qty(newTotal), Html.esc(m.unit()));
+                    return new StockUpdateResult(true, adminMsg, broadcastMsg);
+                } else {
+                    materials.insertManual(account, code, name, unit, priceVat, addQty);
+                    String adminMsg = String.format("""
+                            ✅ <b>Новый материал успешно добавлен на склад!</b>
+                            • Счёт: <b>%s</b>
+                            • Наименование: <b>%s</b>
+                            • Инв. №: <code>%s</code>
+                            • Количество: <b>%s %s</b>
+                            • Цена с НДС: <b>%s руб.</b>""",
+                            Html.esc(account), Html.esc(name), Html.esc(code), qty(addQty), escUnit, price(priceVat));
+                    String broadcastMsg = String.format("""
+                            🆕 <b>Новый материал на складе!</b>
+                            
+                            • Наименование: <b>%s</b>
+                            • Инв. №: <code>%s</code>
+                            • Количество: <b>%s %s</b>
+                            • Цена с НДС: <b>%s руб.</b>""",
+                            Html.esc(name), Html.esc(code), qty(addQty), escUnit, price(priceVat));
+                    return new StockUpdateResult(true, adminMsg, broadcastMsg);
+                }
+            });
+        } catch (DataAccessException e) {
+            log.error("Ошибка ручного добавления материала {}", code, e);
+            return new StockUpdateResult(false, "❌ Ошибка БД: " + Html.esc(e.getMessage()), null);
+        }
+    }
+
     /** Полная очистка склада (таблица materials). */
     @Override
     public void clearWarehouse() {

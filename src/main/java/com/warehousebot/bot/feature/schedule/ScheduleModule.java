@@ -270,8 +270,8 @@ public final class ScheduleModule implements BotModule {
         if (target == null) return false;
         Integer anchorId = target.anchorId();
 
-        Optional<DateInputParser.ParsedScheduleInput> parsed =
-                DateInputParser.parseWithOptionalTime(ctx.trimmed(), LocalDate.now());
+        Optional<DateInputParser.ParsedEditInput> parsed =
+                DateInputParser.parseEditInput(ctx.trimmed(), LocalDate.now());
         if (parsed.isEmpty()) {
             ctx.session().put(EDIT_USER, target);
             if (anchorId != null) {
@@ -280,18 +280,16 @@ public final class ScheduleModule implements BotModule {
             return true;
         }
 
-        DateInputParser.ParsedScheduleInput input = parsed.get();
-        List<LocalDate> dates = input.dates();
+        DateInputParser.ParsedEditInput input = parsed.get();
 
-        // Если вместе с датой сразу ввели время (например: "17.10 8:30-16:15" или "17.10-21.10 08:30-17:30") —
-        // применяем смену мгновенно без показа кнопок!
-        if (input.hasTime()) {
-            String timeLabel = input.startTime() + "-" + input.endTime();
-            saveAndNotifyShift(ctx.chatId(), ctx.role(), target.excelName(), dates,
-                    "", input.startTime(), input.endTime(), timeLabel, anchorId);
+        // Если ввели сразу со временем/кодом или несколько записей через «;» — сохраняем всё сразу!
+        if (input.isImmediateBatch()) {
+            saveBatchAndNotify(ctx.chatId(), ctx.role(), target.excelName(), input.entries(), anchorId);
             return true;
         }
 
+        // Иначе введены только даты — показываем кнопки с выбором смены
+        List<LocalDate> dates = input.datesOnly();
         String displayDate = dates.size() == 1
                 ? dates.get(0).format(DATE) : "выбранные дни (" + dates.size() + " шт.)";
         ctx.session().put(EDIT_DATES, new PendingEdit(target.excelName(), dates, anchorId));
@@ -322,32 +320,47 @@ public final class ScheduleModule implements BotModule {
             end = times[1];
         }
 
-        String shiftLabel = statusCode.isEmpty() ? payload : statusCode;
-        if (saveAndNotifyShift(ctx.chatId(), ctx.role(), edit.excelName(), edit.dates(),
-                statusCode, start, end, shiftLabel, anchorId)) {
+        DateInputParser.ScheduleEntry single = new DateInputParser.ScheduleEntry(edit.dates(), statusCode, start, end);
+        if (saveBatchAndNotify(ctx.chatId(), ctx.role(), edit.excelName(), List.of(single), anchorId)) {
             ctx.answer(ScheduleView.EDIT_SAVED, false);
         }
     }
 
-    private boolean saveAndNotifyShift(long chatId, Role role, String excelName, List<LocalDate> dates,
-                                       String statusCode, String start, String end, String shiftLabel, Integer anchorId) {
+    private boolean saveBatchAndNotify(long chatId, Role role, String excelName,
+                                       List<DateInputParser.ScheduleEntry> entries, Integer anchorId) {
         try {
-            schedule.setShifts(excelName, dates, statusCode, start, end);
+            for (DateInputParser.ScheduleEntry e : entries) {
+                schedule.setShifts(excelName, e.dates(), e.statusCode(), e.startTime(), e.endTime());
+            }
         } catch (DataAccessException e) {
             log.error("Изменение графика", e);
             menu.show(chatId, role, ScheduleView.EDIT_SAVE_ERROR);
             return false;
         }
 
-        // Окно графика показывает месяц первой изменённой даты.
-        LocalDate first = dates.get(0);
+        LocalDate first = entries.get(0).dates().get(0);
         showSchedule(chatId, excelName, first.getYear(), first.getMonthValue(), false, anchorId);
 
-        List<String> dateStrings = new ArrayList<>();
-        for (LocalDate d : dates) dateStrings.add(d.format(DATE));
-        String datesText = dateStrings.size() > 2 ? dateStrings.size() + " дн." : String.join(", ", dateStrings);
-        users.findUserIdByExcelName(excelName)
-                .ifPresent(id -> ui.notify(id, ScheduleView.shiftChangedNotice(datesText, shiftLabel)));
+        if (entries.size() == 1) {
+            DateInputParser.ScheduleEntry e = entries.get(0);
+            List<String> dateStrings = new ArrayList<>();
+            for (LocalDate d : e.dates()) dateStrings.add(d.format(DATE));
+            String datesText = dateStrings.size() > 2 ? dateStrings.size() + " дн." : String.join(", ", dateStrings);
+            users.findUserIdByExcelName(excelName)
+                    .ifPresent(id -> ui.notify(id, ScheduleView.shiftChangedNotice(datesText, e.label())));
+        } else {
+            StringBuilder summary = new StringBuilder();
+            for (DateInputParser.ScheduleEntry e : entries) {
+                List<LocalDate> ds = e.dates();
+                String range = ds.size() == 1
+                        ? ds.get(0).format(DATE)
+                        : ds.get(0).format(DATE) + "–" + ds.get(ds.size() - 1).format(DATE) + " (" + ds.size() + " дн.)";
+                if (!summary.isEmpty()) summary.append("; ");
+                summary.append(range).append(": ").append(e.label());
+            }
+            users.findUserIdByExcelName(excelName)
+                    .ifPresent(id -> ui.notify(id, ScheduleView.shiftChangedNotice("пакетное изменение", summary.toString())));
+        }
         return true;
     }
 }

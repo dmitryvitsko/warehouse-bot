@@ -2,6 +2,7 @@ package com.warehousebot.bot.feature.stock;
 
 import com.warehousebot.bot.core.Keyboards;
 import com.warehousebot.bot.feature.stock.StockSessions.Screen;
+import com.warehousebot.domain.ActiveUser;
 import com.warehousebot.domain.Material;
 import com.warehousebot.repository.BalanceRepository.Holding;
 import com.warehousebot.util.Html;
@@ -22,6 +23,14 @@ final class WarehouseView {
     static final int PAGE_SIZE = 10;
     static final String SEPARATOR = "➖➖➖➖➖➖➖➖➖➖";
 
+    /** Режим работы карточки материала для администратора. */
+    enum CardMode {
+        TAKE_SELF,       // Обычное взятие себе в подотчет
+        FORCE_ASSIGN,    // Принудительная выдача сотруднику
+        REPLENISH,       // Пополнение остатка на складе (+ с рассылкой)
+        TRANSFER_OUT     // Передача по накладной в другое подразделение (списание со склада)
+    }
+
     private WarehouseView() {
     }
 
@@ -31,8 +40,12 @@ final class WarehouseView {
         return Math.min(Math.max(page, 1), totalPages);
     }
 
-    /** Каталог склада: 10 позиций на странице, кнопки с номерами открывают карточку. */
     static Screen page(List<Material> materials, int requestedPage, String alertText) {
+        return page(materials, requestedPage, alertText, false);
+    }
+
+    /** Каталог склада: 10 позиций на странице, кнопки с номерами открывают карточку. */
+    static Screen page(List<Material> materials, int requestedPage, String alertText, boolean isAdmin) {
         int totalPages = Math.max(1, (int) Math.ceil((double) materials.size() / PAGE_SIZE));
         int page = clampPage(requestedPage, materials.size());
         int start = (page - 1) * PAGE_SIZE;
@@ -68,26 +81,42 @@ final class WarehouseView {
             if (page < totalPages) pageRow.add(btn("➡️", "WH_PAGE:" + (page + 1)));
             rows.addRow(pageRow);
         }
+        if (isAdmin) {
+            rows.add(btn("➕ Добавить новый материал на склад", "WH_ADD_NEW:" + page));
+        }
         rows.add(btn("❌ Закрыть склад", "WH_CLOSE"));
         return new Screen(sb.toString(), rows.build());
     }
 
-    /** Карточка материала: обычная или в режиме принудительной выдачи выбранному сотруднику. */
+    /** Карточка материала: обычная или в специальном режиме администратора. */
     static Screen card(Material m, int page, String alert) {
-        return card(m, page, alert, false, null);
+        return card(m, page, alert, false, CardMode.TAKE_SELF, null);
     }
 
-    static Screen card(Material m, int page, String alert, boolean isAdmin, String targetWorkerName) {
+    static Screen card(Material m, int page, String alert, boolean isAdmin, CardMode mode, String targetWorkerName) {
         StringBuilder sb = new StringBuilder();
         if (alert != null) sb.append(alert).append("\n\n").append(SEPARATOR).append("\n");
         String unit = Html.esc(m.unit());
 
-        if (targetWorkerName != null) {
-            sb.append("👷‍♂️ <b>ПРИНУДИТЕЛЬНАЯ ВЫДАЧА СОТРУДНИКУ: ").append(Html.esc(targetWorkerName)).append("</b>\n\n");
+        switch (mode) {
+            case FORCE_ASSIGN -> sb.append("👷‍♂️ <b>ПРИНУДИТЕЛЬНАЯ ВЫДАЧА СОТРУДНИКУ: ")
+                    .append(Html.esc(String.valueOf(targetWorkerName))).append("</b>\n\n");
+            case REPLENISH -> sb.append("➕ <b>РЕЖИМ ПОПОЛНЕНИЯ СКЛАДА</b>\n")
+                    .append("<i>Все сотрудники получат уведомление о поступлении материала.</i>\n\n");
+            case TRANSFER_OUT -> sb.append("📤 <b>ПЕРЕДАЧА В ДРУГОЕ ПОДРАЗДЕЛЕНИЕ (СПИСАНИЕ СО СКЛАДА)</b>\n")
+                    .append("<i>Материал будет просто вычтен из остатка вашего склада.</i>\n\n");
+            default -> {
+            }
         }
 
-        sb.append(String.format("📦 <b>%s</b>\n\n• На складе: <b>%s %s</b>\n• Цена с НДС: <b>%s руб.</b>\n\n✍️ <b>Напишите количество (%s) в чат</b> ИЛИ выберите кнопкой:",
-                Html.esc(m.name()), qty(m.warehouseQty()), unit, price(m.priceWithVat()), unit));
+        String actionPrompt = switch (mode) {
+            case REPLENISH -> "✍️ <b>Напишите в чат, сколько %s добавить к остатку</b> ИЛИ выберите кнопкой:";
+            case TRANSFER_OUT -> "✍️ <b>Напишите в чат, сколько %s списать со склада</b> ИЛИ выберите кнопкой:";
+            default -> "✍️ <b>Напишите количество (%s) в чат</b> ИЛИ выберите кнопкой:";
+        };
+
+        sb.append(String.format("📦 <b>%s</b>\n• Инв. №: <code>%s</code>\n• На складе: <b>%s %s</b>\n• Цена с НДС: <b>%s руб.</b>\n\n" + actionPrompt,
+                Html.esc(m.name()), Html.esc(m.code()), qty(m.warehouseQty()), unit, price(m.priceWithVat()), unit));
 
         String prefix = "WH_TAKE:" + m.id() + ":";
         Keyboards.Rows rows = Keyboards.rows();
@@ -96,11 +125,16 @@ final class WarehouseView {
         rows.addRow(row(btn("10", prefix + "10:" + page), btn("15", prefix + "15:" + page),
                 btn("20", prefix + "20:" + page), btn("50", prefix + "50:" + page)));
 
-        if (isAdmin && targetWorkerName == null) {
-            rows.add(btn("👷‍♂️ Выдать сотруднику (принудительно)", "WH_F_USR:" + m.id() + ":" + page));
-        }
-        if (targetWorkerName != null) {
-            rows.add(btn("🔄 Сменить сотрудника", "WH_F_USR:" + m.id() + ":" + page));
+        if (isAdmin) {
+            if (mode == CardMode.TAKE_SELF) {
+                rows.add(btn("👷‍♂️ Выдать сотруднику (принудительно)", "WH_F_USR:" + m.id() + ":" + page));
+                rows.addRow(row(
+                        btn("➕ Пополнить склад", "WH_MODE:ADD:" + m.id() + ":" + page),
+                        btn("📤 Передать (Списать)", "WH_MODE:OUT:" + m.id() + ":" + page)
+                ));
+            } else {
+                rows.add(btn("🔙 Обычный режим (Взять себе)", "WH_ITEM:" + m.id() + ":" + page));
+            }
         }
 
         rows.add(btn("🔙 Назад к списку", "WH_PAGE:" + page));
@@ -108,12 +142,12 @@ final class WarehouseView {
     }
 
     /** Список сотрудников для принудительной выдачи материала со склада. */
-    static Screen forceUsersMenu(Material m, int page, List<com.warehousebot.domain.ActiveUser> users) {
+    static Screen forceUsersMenu(Material m, int page, List<ActiveUser> users) {
         String text = "👷‍♂️ <b>Принудительная выдача материала:</b>\n"
                 + "📦 <b>" + Html.esc(m.name()) + "</b> (доступно: " + qty(m.warehouseQty()) + " " + Html.esc(m.unit()) + ")\n\n"
                 + "👇 Выберите сотрудника, которому нужно записать материал в подотчет:";
         Keyboards.Rows rows = Keyboards.rows();
-        for (com.warehousebot.domain.ActiveUser u : users) {
+        for (ActiveUser u : users) {
             String icon = u.role().isAdmin() ? "👑 " : "👷‍♂️ ";
             rows.add(btn(icon + u.fullName(), "WH_F_SEL:" + m.id() + ":" + page + ":" + u.id()));
         }
@@ -121,7 +155,23 @@ final class WarehouseView {
         return new Screen(text, rows.build());
     }
 
-    /** Ввод количества для материала, выбранного кнопкой TAKE_MAT (старые сообщения со списком склада). */
+    /** Подсказка для добавления новой позиции вручную. */
+    static Screen addNewMaterialPrompt(int page, String errorAlert) {
+        StringBuilder sb = new StringBuilder();
+        if (errorAlert != null) sb.append(errorAlert).append("\n\n").append(SEPARATOR).append("\n");
+        sb.append("""
+                ➕ <b>Добавление / пополнение материала на складе</b>
+                
+                Отправьте данные одной строкой через точку с запятой (<code>;</code>):
+                <code>Счёт; Инв. №; Наименование; Ед. изм.; Цена с НДС; Количество</code>
+                
+                📌 <b>Пример:</b>
+                <code>10.05; 104592; Кабель UTP 4PR кат.5е; м; 0.85; 305</code>
+                
+                <i>💡 Если материал с таким Инв. № уже есть в базе, бот просто прибавит количество к текущему остатку и разошлет всем уведомление!</i>""");
+        return new Screen(sb.toString(), Keyboards.single("🔙 Назад к складу", "WH_PAGE:" + page));
+    }
+
     static final String TAKE_QTY_PROMPT = "✍ <b>Укажите количество:</b>\nНапишите число вручную (например: <code>15</code>) ИЛИ нажмите на кнопку:";
 
     static InlineKeyboardMarkup takeQtyKeyboard() {

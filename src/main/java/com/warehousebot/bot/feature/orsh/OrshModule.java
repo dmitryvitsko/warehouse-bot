@@ -4,6 +4,7 @@ import com.warehousebot.bot.common.MainMenu;
 import com.warehousebot.bot.common.Ui;
 import com.warehousebot.bot.core.BotModule;
 import com.warehousebot.bot.core.CallbackContext;
+import com.warehousebot.bot.core.Keyboards;
 import com.warehousebot.bot.core.MessageContext;
 import com.warehousebot.bot.core.Messenger;
 import com.warehousebot.bot.core.Routes;
@@ -28,9 +29,12 @@ public final class OrshModule implements BotModule {
 
     private static final Logger log = LoggerFactory.getLogger(OrshModule.class);
 
+    /** Маркер в WAITING_PROBLEM_REASON: администратор вводит новый шкаф ОРШ вручную. */
+    private static final int ADD_MANUAL_ORSH_SENTINEL = -1;
+
     /** ОРШ, для которого ждём фото. */
     private static final SessionKey<Integer> WAITING_PHOTO = SessionKey.dialog("orsh.waitingPhoto");
-    /** ОРШ, для которого ждём причину невозможности осмотра. */
+    /** ОРШ, для которого ждём причину невозможности осмотра (или -1 для добавления нового ОРШ). */
     private static final SessionKey<Integer> WAITING_PROBLEM_REASON = SessionKey.dialog("orsh.waitingProblemReason");
 
     private final Messenger messenger;
@@ -53,6 +57,7 @@ public final class OrshModule implements BotModule {
         r.onCommand(MainMenu.ADMIN_ORSH_STATS, ctx -> {
             if (ctx.isAdmin()) ui.closable(ctx.chatId(), OrshView.statisticsText(orsh.statistics()));
         });
+        r.onCallback("ORSH_ADD_MANUAL").adminOnly().handle(this::askAddManual);
         r.onCallbackPrefix("ORSH_SEL:").handle(this::showDetails);
         r.onCallbackPrefix("ORSH_PROB:").handle(this::reportProblem);
         r.onText(TextStage.ORSH_PROBLEM_INPUT, this::onProblemReason);
@@ -62,10 +67,22 @@ public final class OrshModule implements BotModule {
     private void showPending(long chatId, Role role) {
         List<OrshCabinet> pending = orsh.pending();
         if (pending.isEmpty()) {
-            menu.show(chatId, role, "🎉 <b>План осмотра пуст!</b>");
+            if (role.isAdmin()) {
+                messenger.send(chatId, "🎉 <b>План осмотра пуст!</b>\nВы можете загрузить план из Excel или добавить шкаф вручную:",
+                        OrshView.pendingListKeyboard(List.of(), true));
+            } else {
+                menu.show(chatId, role, "🎉 <b>План осмотра пуст!</b>");
+            }
             return;
         }
-        messenger.send(chatId, OrshView.pendingListText(pending.size()), OrshView.pendingListKeyboard(pending));
+        messenger.send(chatId, OrshView.pendingListText(pending.size()),
+                OrshView.pendingListKeyboard(pending, role.isAdmin()));
+    }
+
+    private void askAddManual(CallbackContext ctx) {
+        ctx.session().remove(WAITING_PHOTO);
+        ctx.session().put(WAITING_PROBLEM_REASON, ADD_MANUAL_ORSH_SENTINEL);
+        messenger.edit(ctx.chatId(), ctx.messageId(), OrshView.ADD_MANUAL_PROMPT, Keyboards.cancelPrompt());
     }
 
     private void showDetails(CallbackContext ctx) {
@@ -91,6 +108,20 @@ public final class OrshModule implements BotModule {
     private boolean onProblemReason(TextContext ctx) {
         Integer orshId = ctx.session().remove(WAITING_PROBLEM_REASON);
         if (orshId == null) return false;
+
+        // Режим ручного добавления нового шкафа ОРШ администратором
+        if (orshId == ADD_MANUAL_ORSH_SENTINEL) {
+            String res = orsh.addCabinetsManual(ctx.trimmed());
+            if (res.startsWith("❌")) {
+                ctx.session().put(WAITING_PROBLEM_REASON, ADD_MANUAL_ORSH_SENTINEL);
+                ui.cancelPrompt(ctx.chatId(), res + "\n\nПопробуйте ввести еще раз:");
+                return true;
+            }
+            menu.show(ctx.chatId(), ctx.role(), res);
+            showPending(ctx.chatId(), ctx.role());
+            return true;
+        }
+
         orsh.markProblem(orshId, ctx.firstName(), ctx.text());
         menu.show(ctx.chatId(), ctx.role(), "⚠️ Причина зафиксирована. Этот ОРШ переведен в статус проблемных.");
         return true;

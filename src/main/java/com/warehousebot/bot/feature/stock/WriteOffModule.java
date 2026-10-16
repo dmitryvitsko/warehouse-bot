@@ -250,6 +250,7 @@ public final class WriteOffModule implements BotModule {
     }
 
     private void decide(CallbackContext ctx, ReturnService.Decision d) {
+        messenger.delete(ctx.chatId(), ctx.messageId()); // 👈 Удаляем уведомление с кнопками из чата!
         menu.show(ctx.chatId(), ctx.role(), d.adminMessage());
         if (d.ok() && d.workerId() != ctx.chatId()) ui.notify(d.workerId(), d.workerMessage());
     }

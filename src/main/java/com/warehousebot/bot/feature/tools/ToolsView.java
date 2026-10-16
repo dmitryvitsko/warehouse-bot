@@ -83,10 +83,23 @@ final class ToolsView {
                 row(btn("📊 Общая сводка", "tool_menu_audit"), btn("👤 Сводка по людям", "tool_menu_audit_users")),
                 row(btn("📤 Выдать", "tool_menu_give"), btn("📥 Вернуть", "tool_menu_return")),
                 row(btn("🗑 Списать", "tool_menu_writeoff"), btn("♻️ Восстановить", "tool_menu_restore")),
-                row(btn("📦 Передать (Удалить из базы)", "tool_menu_transfer")),
+                row(btn("➕ Добавить вручную", "tool_menu_add_manual"), btn("📦 Передать (Удалить)", "tool_menu_transfer")),
                 row(btn("🗄 Архив", "tool_menu_archive"), btn("📢 Рассылка: Аудит", "tool_menu_notify")),
                 row(btn("❌ Закрыть панель", "tool_menu_close")));
     }
+
+    static final String ADD_MANUAL_PROMPT = """
+            ➕ <b>Добавление нового инструмента</b>
+            
+            Отправьте данные через точку с запятой (<code>;</code>):
+            <code>Название инструмента; Инв. номер; Количество</code>
+            
+            📌 <b>Пример:</b>
+            <code>Визуальный локатор VFL; 004512; 2</code>
+            
+            <i>💡 Если инструмент без номера, оставьте поле пустым:</i>
+            <code>Стриппер для патчкордов; ; 3</code>
+            <i>(Можно отправить сразу несколько позиций, каждую с новой строки)</i>""";
 
     static final String ERR_DELETE = "❌ Ошибка БД при удалении инструмента.";
 

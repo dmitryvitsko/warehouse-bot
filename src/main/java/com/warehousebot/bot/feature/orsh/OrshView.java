@@ -26,10 +26,28 @@ final class OrshView {
         return "📸 <b>Осталось проверить: " + count + " шт.</b>\nВыберите адрес:";
     }
 
+    static final String ADD_MANUAL_PROMPT = """
+            ➕ <b>Добавление шкафа в план осмотра ОРШ</b>
+            
+            Отправьте данные через точку с запятой (<code>;</code>):
+            <code>Номер ОРШ; Адрес; Местоположение</code>
+            
+            📌 <b>Пример:</b>
+            <code>145; ул. Притыцкого, 42; подвал 1 подъезда</code>
+            
+            <i>(Можно отправить сразу несколько шкафов, каждый с новой строки)</i>""";
+
     static InlineKeyboardMarkup pendingListKeyboard(List<OrshCabinet> pending) {
+        return pendingListKeyboard(pending, false);
+    }
+
+    static InlineKeyboardMarkup pendingListKeyboard(List<OrshCabinet> pending, boolean isAdmin) {
         Keyboards.Rows rows = Keyboards.rows();
         for (OrshCabinet c : pending.subList(0, Math.min(MAX_LIST_BUTTONS, pending.size()))) {
             rows.add(btn("📍 " + Formats.cut(c.address(), 35), "ORSH_SEL:" + c.id()));
+        }
+        if (isAdmin) {
+            rows.add(btn("➕ Добавить ОРШ вручную", "ORSH_ADD_MANUAL"));
         }
         rows.add(btn("❌ Закрыть", Keyboards.GENERIC_CLOSE));
         return rows.build();

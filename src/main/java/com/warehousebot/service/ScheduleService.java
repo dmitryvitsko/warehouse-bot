@@ -24,8 +24,8 @@ public final class ScheduleService implements ScheduleFacade {
 
     private static final Logger log = LoggerFactory.getLogger(ScheduleService.class);
 
-    /** Коды статусов «не рабочая смена»: выходной, отпуск, дежурство, больничный, за свой счёт, военкомат, др. подразделение. */
-    public static final Set<String> STATUS_CODES = Set.of("В", "О", "Д", "Б", "А", "Г", "П");
+    /** Коды статусов «не рабочая смена»: выходной, отпуск, дежурство, больничный, за свой счёт, военкомат, др. подразделение, учебный отпуск. */
+    public static final Set<String> STATUS_CODES = Set.of("В", "О", "Д", "Б", "А", "Г", "П", "У");
 
     /** Ранг «нет в списке старших». */
     public static final int NO_RANK = 99;

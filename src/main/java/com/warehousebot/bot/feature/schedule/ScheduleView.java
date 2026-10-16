@@ -30,7 +30,14 @@ final class ScheduleView {
     static final String EDITOR_TITLE = "✏️ <b>Редактор графиков</b>\nВыберите сотрудника:";
     static final String NEW_EMPLOYEE_PROMPT = "👤 Введите ФИО нового сотрудника (например: <b>Баранов А.В.</b>):";
     static final String FRIDAY_QUESTION = "🗓 <b>Уточните дату</b>\n\nВы хотите посмотреть график на выходной день (Суббота) или на следующий рабочий (Понедельник)?";
-    static final String EDIT_DATE_ERROR = "❌ <b>Не удалось распознать дату.</b>\n\nВы можете писать в любых форматах (с годом и без):\n• Одиночно: <code>15.11</code> или <code>15.11.26</code> или <code>15.11.2026</code>\n• Диапазон: <code>01.11-07.11</code> или <code>01.11.26-07.11.2026</code>\n• Комбинировано: <code>10.11, 15.11-18.11, 20.11.26</code>\n\nВведите даты еще раз:";
+    static final String EDIT_DATE_ERROR = "❌ <b>Не удалось распознать ввод.</b>\n\n"
+            + "Вы можете ввести:\n"
+            + "1️⃣ <b>Просто даты</b> (затем выберете смену кнопкой):\n"
+            + "<code>15.11</code> или <code>01.11-07.11</code> или <code>10.11, 15.11</code>\n\n"
+            + "2️⃣ <b>Даты сразу со временем или кодом через «;»</b>:\n"
+            + "<code>17.10-21.10 8:30-18:00; 22.10, 30.10 В; 31.10 12:00-21:00</code>\n"
+            + "<i>Коды: В, О, Д, Б, А, Г, П, У (учебный)</i>\n\n"
+            + "Введите данные еще раз:";
     static final String EDIT_SESSION_ERROR = "❌ Ошибка сессии редактирования. Начните заново.";
     static final String EDIT_SAVE_ERROR = "❌ Ошибка при сохранении дат.";
     static final String EDIT_SAVED = "✅ График успешно изменен!";
@@ -154,6 +161,7 @@ final class ScheduleView {
         if ("А".equals(status)) return String.format("📄 <b>%s, %02d</b> — За свой счет", dow, dayNum);
         if ("Г".equals(status)) return String.format("🪖 <b>%s, %02d</b> — Военкомат", dow, dayNum);
         if ("П".equals(status)) return String.format("🏢 <b>%s, %02d</b> — Др. подразделение", dow, dayNum);
+        if ("У".equals(status)) return String.format("🎓 <b>%s, %02d</b> — Учебный отпуск", dow, dayNum);
 
         if (date.getDayOfWeek() == DayOfWeek.SATURDAY) {
             return String.format("🟥 <u><b>%s, %02d</b></u> — %s ❗️ <b>РАБОЧАЯ СУББОТА</b>", dow, dayNum, timeRange);
@@ -232,6 +240,7 @@ final class ScheduleView {
             else if ("Б".equals(status)) absent.add("▪️ " + name + " — 💊 Больничный");
             else if ("А".equals(status)) absent.add("▪️ " + name + " — 📄 За свой счет");
             else if ("Г".equals(status)) absent.add("▪️ " + name + " — 🪖 Военкомат");
+            else if ("У".equals(status)) absent.add("▪️ " + name + " — 🎓 Учебный отпуск");
             else if ("П".equals(status)) otherDept.add("▪️ " + name);
             else if ("Д".equals(status)) duty.add("▪️ " + name + " — ❗️ Дежурство");
             else if (ScheduleService.isSecondShift(r.startTime(), r.endTime())) secondShift.add(r);
@@ -287,7 +296,13 @@ final class ScheduleView {
     // ------------------------------------------------------------------ редактирование
 
     static String editUserPrompt(String excelName) {
-        return "✏️ Выбран сотрудник: <b>" + Html.esc(excelName) + "</b>\n\nНапишите дни, которые нужно изменить.\n\n<i>Можно писать без года:</i> <code>15.11</code>\n<i>Через запятую:</i> <code>10.11.2026, 15.11.26, 20.11</code>\n<i>Диапазоны:</i> <code>01.11-07.11</code>\n<i>Даже всё вместе:</i> <code>10.11, 14.11-19.11</code>";
+        return "✏️ Выбран сотрудник: <b>" + Html.esc(excelName) + "</b>\n\n"
+                + "Напишите дни, которые нужно изменить:\n\n"
+                + "🔹 <b>Вариант 1 (выбор кнопкой):</b>\n"
+                + "<code>15.11</code> или <code>01.11-07.11</code> или <code>10.11, 14.11-19.11</code>\n\n"
+                + "🔹 <b>Вариант 2 (пакетно одной строкой через «;»):</b>\n"
+                + "<code>17.10-21.10 8:30-18:00; 22.10, 30.10 В; 31.10 12:00-21:00</code>\n"
+                + "<i>Коды: В, О, Д, Б, А, Г, П, У (учебный отпуск)</i>";
     }
 
     static String chooseShiftText(String displayDate, String excelName) {
@@ -298,7 +313,7 @@ final class ScheduleView {
         return Keyboards.of(
                 row(btn("В (Выходной)", "ED_SCH_S:В"), btn("О (Отпуск)", "ED_SCH_S:О"), btn("Д (Дежурство)", "ED_SCH_S:Д")),
                 row(btn("Б (Больничный)", "ED_SCH_S:Б"), btn("А (За свой счет)", "ED_SCH_S:А"), btn("Г (Военкомат)", "ED_SCH_S:Г")),
-                row(btn("П (Другое подразделение)", "ED_SCH_S:П")),
+                row(btn("П (Другое подразделение)", "ED_SCH_S:П"), btn("У (Учебный отпуск)", "ED_SCH_S:У")),
                 row(btn("08:30 - 17:30", "ED_SCH_S:08:30-17:30"), btn("12:00 - 21:00", "ED_SCH_S:12:00-21:00")),
                 row(btn("08:00 - 16:00 (Суббота)", "ED_SCH_S:08:00-16:00")),
                 row(btn("❌ Отменить", Keyboards.CANCEL_PROMPT)));

@@ -238,6 +238,46 @@ public final class ToolService implements ToolFacade {
         }
     }
 
+    /**
+     * Ручное добавление инструмента текстом: «Название; Инв. номер; Количество» (можно несколько строк).
+     */
+    public String addToolsManual(String rawText) {
+        String[] lines = rawText.split("\\r?\\n");
+        List<ToolRow> rows = new ArrayList<>();
+        for (String line : lines) {
+            String trimmed = line.trim();
+            if (trimmed.isEmpty()) continue;
+            String[] parts = trimmed.split(";");
+            if (parts.length < 3) {
+                return "❌ <b>Неверный формат!</b>\nНужно 3 параметра через точку с запятой:\n"
+                        + "<code>Название инструмента; Инв. номер; Количество</code>\n\n"
+                        + "Пример: <code>Визуальный локатор VFL; 004512; 2</code>";
+            }
+            String name = parts[0].trim();
+            String inv = parts[1].trim();
+            int qty;
+            try {
+                qty = Integer.parseInt(parts[2].trim());
+                if (name.isEmpty() || qty <= 0) throw new NumberFormatException();
+            } catch (NumberFormatException e) {
+                return "❌ <b>Ошибка в данных!</b> Проверьте название и количество (должно быть целое число больше 0).";
+            }
+            rows.add(new ToolRow(name, inv, qty));
+        }
+        if (rows.isEmpty()) {
+            return "❌ Пустой ввод.";
+        }
+        try {
+            ImportResult r = saveImported(rows);
+            return "✅ <b>Инструмент успешно добавлен в базу!</b>\n"
+                    + "Добавлено новых единиц: <b>" + r.added() + "</b> шт.\n"
+                    + (r.updated() > 0 ? "Обновлено существующих: <b>" + r.updated() + "</b> шт." : "");
+        } catch (DataAccessException e) {
+            log.error("Ошибка ручного добавления инструмента", e);
+            return "❌ Ошибка БД при сохранении инструмента: " + Html.esc(String.valueOf(e.getMessage()));
+        }
+    }
+
     @Override
     public String userToolsText(long userId) {
         List<Tool> list;

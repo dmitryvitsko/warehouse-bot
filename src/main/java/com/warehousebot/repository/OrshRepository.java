@@ -63,4 +63,14 @@ public final class OrshRepository {
         return db.query("SELECT orsh_number, reason, inspected_by FROM orsh_inspections WHERE status = 'PROBLEM'",
                 rs -> new OrshProblem(rs.getString("orsh_number"), rs.getString("reason"), rs.getString("inspected_by")));
     }
+
+    /** Добавляет один или несколько новых шкафов ОРШ в текущий план осмотра (без удаления существующих). */
+    public void insertManual(List<OrshCabinet> cabinets) {
+        List<Object[]> rows = new ArrayList<>(cabinets.size());
+        for (OrshCabinet c : cabinets) rows.add(new Object[]{c.number(), c.address(), c.location()});
+        if (!rows.isEmpty()) {
+            db.batch("INSERT INTO orsh_inspections (orsh_number, address, location) VALUES (?, ?, ?)", rows);
+        }
+    }
+
 }

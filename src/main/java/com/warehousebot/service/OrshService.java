@@ -74,4 +74,40 @@ public final class OrshService {
         }
         return "✅ <b>План осмотра ОРШ успешно загружен!</b>\nДобавлено шкафов: <b>" + cabinets.size() + "</b> шт.";
     }
+
+    /**
+     * Ручное добавление шкафов ОРШ текстом: «Номер ОРШ; Адрес; Местоположение» (можно несколько строк).
+     */
+    public String addCabinetsManual(String rawText) {
+        String[] lines = rawText.split("\\r?\\n");
+        List<OrshCabinet> cabinets = new ArrayList<>();
+        for (String line : lines) {
+            String trimmed = line.trim();
+            if (trimmed.isEmpty()) continue;
+            String[] parts = trimmed.split(";");
+            if (parts.length < 3) {
+                return "❌ <b>Неверный формат!</b>\nНужно 3 параметра через точку с запятой:\n"
+                        + "<code>Номер ОРШ; Адрес; Местоположение</code>\n\n"
+                        + "Пример: <code>145; ул. Притыцкого, 42; подвал 1 подъезда</code>";
+            }
+            String num = parts[0].trim();
+            String addr = parts[1].trim();
+            String loc = parts[2].trim();
+            if (num.isEmpty() || addr.isEmpty()) {
+                return "❌ <b>Ошибка:</b> Номер ОРШ и Адрес не могут быть пустыми!";
+            }
+            cabinets.add(new OrshCabinet(0, num, addr, loc));
+        }
+        if (cabinets.isEmpty()) {
+            return "❌ Пустой ввод.";
+        }
+        try {
+            orsh.insertManual(cabinets);
+            return "✅ <b>Добавлено в план осмотра ОРШ: " + cabinets.size() + " шт.!</b>";
+        } catch (DataAccessException e) {
+            log.error("Ошибка ручного добавления ОРШ", e);
+            return "❌ Ошибка БД при добавлении ОРШ.";
+        }
+    }
+
 }

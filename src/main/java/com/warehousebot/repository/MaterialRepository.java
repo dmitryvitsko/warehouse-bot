@@ -99,4 +99,26 @@ public final class MaterialRepository {
                         rs.getString("work_unit"), rs.getDouble("price_with_vat"), rs.getDouble("conv_factor"),
                         rs.getString("original_unit")));
     }
+
+    public Optional<Material> findByCode(String code) {
+        return db.queryOne("SELECT id, account_number, code, name, work_unit, price_with_vat, warehouse_qty, batch_info FROM materials WHERE code = ?",
+                rs -> new Material(rs.getInt("id"), rs.getString("account_number"), rs.getString("code"),
+                        rs.getString("name"), rs.getString("work_unit"), rs.getDouble("price_with_vat"),
+                        rs.getDouble("warehouse_qty"), rs.getString("batch_info")), code);
+    }
+
+    public void addStockAndPrice(int materialId, double addQty, double priceWithVat) {
+        db.update("UPDATE materials SET warehouse_qty = warehouse_qty + ?, price_with_vat = ?, in_qty = in_qty + ? WHERE id = ?",
+                addQty, priceWithVat, addQty, materialId);
+    }
+
+    public void insertManual(String account, String code, String name, String unit, double priceWithVat, double qty) {
+        db.update("""
+                INSERT INTO materials (
+                    account_number, code, name, original_unit, work_unit, conv_factor,
+                    price_with_vat, warehouse_qty, batch_info, start_qty, start_sum, in_qty, out_qty, end_sum
+                ) VALUES (?, ?, ?, ?, ?, 1.0, ?, ?, '', 0, 0, ?, 0, ?)""",
+                account, code, name, unit, unit, priceWithVat, qty, qty, qty * priceWithVat);
+    }
+
 }

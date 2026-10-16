@@ -33,6 +33,7 @@ import java.util.function.Supplier;
 public final class ToolsModule implements BotModule {
 
     private static final Logger log = LoggerFactory.getLogger(ToolsModule.class);
+    private static final int ADD_MANUAL_TOOL_SENTINEL = -1;
 
     /** Единица инструмента, для которой администратор вводит причину списания. */
     private static final SessionKey<Integer> WAITING_WRITE_OFF_REASON = SessionKey.dialog("tools.waitingWriteOffReason");
@@ -77,6 +78,10 @@ public final class ToolsModule implements BotModule {
         panelButton(r, "tool_menu_transfer", ctx -> messenger.edit(ctx.chatId(), ctx.messageId(),
                 "📦 <b>Передача в другое подразделение (удаление из базы)</b>\nГде сейчас числится инструмент?",
                 ToolsView.transferLocationKeyboard()));
+        panelButton(r, "tool_menu_add_manual", ctx -> {
+            ctx.session().put(WAITING_WRITE_OFF_REASON, ADD_MANUAL_TOOL_SENTINEL);
+            messenger.edit(ctx.chatId(), ctx.messageId(), ToolsView.ADD_MANUAL_PROMPT, ToolsView.writeOffReasonKeyboard());
+        });
 
         adminPrefix(r, "T_TR_LOC:", ctx -> {
             if (ctx.part(1).equals("STOCK")) showGroupsForTransfer(ctx);
@@ -369,6 +374,21 @@ public final class ToolsModule implements BotModule {
     private boolean onWriteOffReason(TextContext ctx) {
         Integer toolId = ctx.session().remove(WAITING_WRITE_OFF_REASON);
         if (toolId == null) return false;
+
+        // Если это режим ручного добавления нового инструмента
+        if (toolId == ADD_MANUAL_TOOL_SENTINEL) {
+            String res = tools.addToolsManual(ctx.trimmed());
+            if (res.startsWith("❌")) {
+                ctx.session().put(WAITING_WRITE_OFF_REASON, ADD_MANUAL_TOOL_SENTINEL);
+                messenger.clearChatHistory(ctx.chatId());
+                sendPanel(ctx.chatId(), res);
+                return true;
+            }
+            messenger.clearChatHistory(ctx.chatId());
+            sendPanel(ctx.chatId(), res);
+            return true;
+        }
+
         String reason = ctx.text();
         String res = safely(() -> tools.writeOff(toolId, reason).map(t -> ToolsView.writtenOff(t, reason)).orElseGet(() -> ToolsView.unchanged(tools.status(toolId))),
                 ToolsView.ERR_WRITE_OFF);

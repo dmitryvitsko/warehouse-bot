@@ -5,6 +5,7 @@ import com.warehousebot.Feature;
 import com.warehousebot.bot.core.BotModule;
 import com.warehousebot.infrastructure.tm.TmClient;
 import com.warehousebot.repository.TmAccountRepository;
+import com.warehousebot.repository.UserRepository;
 import com.warehousebot.service.StockFacade;
 import com.warehousebot.service.TmService;
 
@@ -19,8 +20,9 @@ public final class TmFeature implements Feature {
     public TmFeature(AppContext ctx, StockFacade stock) {
         TmClient client = new TmClient(ctx.config().tmApiUrl());
         TmService tm = new TmService(new TmAccountRepository(ctx.db()), client);
+        UserRepository users = new UserRepository(ctx.db());
         this.tasks = new TmModule(ctx.messenger(), ctx.ui(), ctx.menu(), ctx.userService(), tm);
-        this.report = new TmReportModule(ctx.messenger(), tm, stock, tasks);
+        this.report = new TmReportModule(ctx.messenger(), ctx.ui(), users, tm, stock, tasks);
     }
 
     @Override

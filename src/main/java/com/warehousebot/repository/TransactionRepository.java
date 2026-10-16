@@ -120,4 +120,8 @@ public final class TransactionRepository {
                         rs.getString("original_unit"), rs.getDouble("conv_factor"), rs.getDouble("paid_qty"),
                         rs.getDouble("free_qty"), rs.getDouble("total_work_qty")));
     }
+    /** Очищает журнал транзакций (выдачи, возвраты, списания) для начала отчета нового месяца. */
+    public int clearAllTransactions() {
+        return db.update("DELETE FROM transactions");
+    }
 }

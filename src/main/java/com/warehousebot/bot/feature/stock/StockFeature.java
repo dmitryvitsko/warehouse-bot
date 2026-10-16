@@ -35,7 +35,7 @@ public final class StockFeature implements Feature {
         ReportService reports = new ReportService(transactions, materials, balances);
 
         this.modules = List.of(
-                new WarehouseModule(ctx.messenger(), ctx.ui(), ctx.menu(), stock, reports, ctx.email()),
+                new WarehouseModule(ctx.messenger(), ctx.ui(), ctx.menu(),ctx.users(), stock, reports, ctx.email()),
                 new WriteOffModule(ctx.messenger(), ctx.ui(), ctx.menu(), ctx.users(), stock, returns),
                 new ReceiptModule(ctx.messenger(), ctx.ui(), ctx.menu(), receipts, tariffs));
     }

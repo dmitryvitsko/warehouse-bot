@@ -180,6 +180,15 @@ public final class ToolService implements ToolFacade {
         });
     }
 
+    /** Полностью удаляет единицу инструмента из базы (передача в другое подразделение). */
+    public Optional<Tool> deletePermanently(int toolId) {
+        return db.inTransaction(() -> {
+            Optional<Tool> tool = tools.findById(toolId);
+            if (tool.isEmpty() || tools.deleteById(toolId) == 0) return Optional.<Tool>empty();
+            return tool;
+        });
+    }
+
     // ------------------------------------------------------------------ импорт
 
     /**

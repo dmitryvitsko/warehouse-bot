@@ -93,10 +93,47 @@ public final class StockService implements StockFacade {
         }
     }
 
+    /** Принудительная выдача материала со склада в подотчёт выбранного сотрудника (выполняется администратором). */
+    public TakeResult forceAssign(long targetUserId, String targetUserName, int materialId, double qtyToTake) {
+        if (!(qtyToTake > 0)) return new TakeResult(false, "❌ Количество должно быть больше нуля!");
+        try {
+            return db.inTransaction(() -> {
+                Optional<Material> found = materials.findById(materialId);
+                if (found.isEmpty()) return new TakeResult(false, "❌ Материал не найден.");
+                Material m = found.get();
+                if (qtyToTake > m.warehouseQty() + 1e-9 || !materials.decreaseStock(materialId, qtyToTake)) {
+                    return new TakeResult(false, String.format("❌ На складе недостаточно материала! Доступно всего: <b>%s %s</b>",
+                            qty(m.warehouseQty()), Html.esc(m.unit())));
+                }
+                balances.increase(targetUserId, materialId, qtyToTake);
+                double totalSum = qtyToTake * m.priceWithVat();
+                transactions.logIssue(targetUserId, materialId, qtyToTake, totalSum);
+                String unit = Html.esc(m.unit());
+                return new TakeResult(true, String.format("""
+                                ✅ <b>Принудительно выдано в подотчет:</b>
+                                👤 Сотрудник: <b>%s</b>
+                                • Наименование: <b>%s</b>
+                                • Инв. номер: <code>%s</code>
+                                • Количество: <b>%s %s</b>
+                                • Сумма (с НДС): <b>%s руб.</b>""",
+                        Html.esc(targetUserName), Html.esc(m.name()), Html.esc(m.code()), qty(qtyToTake), unit, price(totalSum)));
+            });
+        } catch (DataAccessException e) {
+            log.error("Ошибка принудительной выдачи материала {} сотруднику {}", materialId, targetUserId, e);
+            return new TakeResult(false, "❌ Ошибка базы данных при принудительной выдаче.");
+        }
+    }
+
     /** Полная очистка склада (таблица materials). */
     @Override
     public void clearWarehouse() {
         materials.deleteAll();
+    }
+
+    /** Очистка истории списаний/выдач для начала нового отчетного месяца. */
+    @Override
+    public int clearTransactionsHistory() {
+        return transactions.clearAllTransactions();
     }
 
     // ------------------------------------------------------------------ подотчёт

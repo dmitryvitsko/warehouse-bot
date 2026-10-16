@@ -49,6 +49,7 @@ final class AdminView {
                 row(btn("✏️ Переименовать (/fix_name)", "ADM_PANEL_RENAME"), btn("🗑 Удалить (/fire)", "ADM_PANEL_DELETE")),
                 row(btn("🔗 Сбросить привязку (/unbind)", "ADM_PANEL_UNBIND")),
                 row(btn("🧹 Очистить склад", "ADM_PANEL_CLR_STOCK"), btn("🛠 Сброс зависших заявок", "ADM_PANEL_FIX_REQ")),
+                row(btn("🗓 Очистить отчет за месяц", "ADM_PANEL_CLR_REP")),
                 row(btn("❌ Закрыть панель", Keyboards.GENERIC_CLOSE)));
     }
 
@@ -141,11 +142,24 @@ final class AdminView {
 
     static final String CLEAR_STOCK_CONFIRM_TEXT = "⚠️ <b>ВНИМАНИЕ!</b>\nВы собираетесь <b>полностью удалить все остатки материалов на складе</b>.\nЭто действие нельзя отменить!";
 
+    static final String CLEAR_REPORT_CONFIRM_TEXT = "⚠️ <b>ВНИМАНИЕ! Начало нового месяца</b>\n\n"
+            + "Вы собираетесь <b>очистить историю списаний для Excel-отчета</b> (листы «По квитанциям», «Без квитанций» и «Сводная»).\n"
+            + "<i>Текущие остатки на складе МОЛ и на руках у мастеров НЕ пострадают.</i>\n\n"
+            + "Убедитесь, что вы уже скачали отчет за прошедший месяц! Продолжить?";
+
+    static InlineKeyboardMarkup clearReportConfirmKeyboard() {
+        return Keyboards.of(
+                row(btn("🚨 Да, обнулить отчет для нового месяца", "ADM_CLR_REP_YES")),
+                row(btn("🔙 Отмена", PANEL_MAIN)));
+    }
+
     static InlineKeyboardMarkup clearStockConfirmKeyboard() {
         return Keyboards.of(
                 row(btn("🚨 Да, полностью очистить склад", "ADM_CLR_STOCK_YES")),
                 row(btn("🔙 Отмена", PANEL_MAIN)));
     }
+
+
 
     // ------------------------------------------------------------------ доступ к ТМ
 

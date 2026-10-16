@@ -74,6 +74,19 @@ public final class ToolsModule implements BotModule {
         panelButton(r, "tool_menu_restore", this::showWrittenOffForRestore);
         panelButton(r, "tool_menu_writeoff", ctx -> messenger.edit(ctx.chatId(), ctx.messageId(),
                 "🗑 <b>Где сейчас находится инструмент, который нужно списать?</b>", ToolsView.writeOffLocationKeyboard()));
+        panelButton(r, "tool_menu_transfer", ctx -> messenger.edit(ctx.chatId(), ctx.messageId(),
+                "📦 <b>Передача в другое подразделение (удаление из базы)</b>\nГде сейчас числится инструмент?",
+                ToolsView.transferLocationKeyboard()));
+
+        adminPrefix(r, "T_TR_LOC:", ctx -> {
+            if (ctx.part(1).equals("STOCK")) showGroupsForTransfer(ctx);
+            else showHoldersForTransfer(ctx);
+        });
+        adminPrefix(r, "T_TR_U:", ctx -> showUserTools(ctx, ctx.longPart(1), "T_TR_ASK:", "T_TR_LOC:ASSIGNED",
+                "📦 <b>Какой инструмент передаем (удаляем из базы)?</b>"));
+        adminPrefix(r, "T_TR_G:", this::showStockUnitsForTransfer);
+        adminPrefix(r, "T_TR_ASK:", this::askTransferConfirm);
+        adminPrefix(r, "T_TR_YES:", this::confirmTransferDelete);
 
         adminPrefix(r, "T_SUMM_U:", ctx -> showUserSummary(ctx, ctx.longPart(1), null));
         adminPrefix(r, "T_SUMM_RET:", ctx -> {
@@ -297,6 +310,47 @@ public final class ToolsModule implements BotModule {
             return;
         }
         messenger.edit(ctx.chatId(), ctx.messageId(), "🗑 <b>Выберите категорию на складе:</b>", ToolsView.groupsForWriteOff(groups));
+    }
+
+    private void showHoldersForTransfer(CallbackContext ctx) {
+        List<UserRef> holders = tools.holders();
+        if (holders.isEmpty()) {
+            restartPanel(ctx, "ℹ️ Нет инструмента на руках.");
+            return;
+        }
+        messenger.edit(ctx.chatId(), ctx.messageId(), "📦 <b>У кого забираем инструмент для передачи?</b>",
+                ToolsView.holdersList(holders, "T_TR_U:", "tool_menu_transfer"));
+    }
+
+    private void showGroupsForTransfer(CallbackContext ctx) {
+        List<ToolGroup> groups = tools.inStockGroups();
+        if (groups.isEmpty()) {
+            restartPanel(ctx, "📦 На складе нет инструмента.");
+            return;
+        }
+        messenger.edit(ctx.chatId(), ctx.messageId(), "📦 <b>Выберите категорию на складе:</b>", ToolsView.groupsForTransfer(groups));
+    }
+
+    private void showStockUnitsForTransfer(CallbackContext ctx) {
+        List<Tool> list = tools.inStockOfGroup(ctx.intPart(1));
+        messenger.edit(ctx.chatId(), ctx.messageId(), "📦 <b>Выберите единицу для удаления из базы:</b>",
+                ToolsView.toolList(list, "🪛", "T_TR_ASK:", "T_TR_LOC:STOCK"));
+    }
+
+    private void askTransferConfirm(CallbackContext ctx) {
+        int toolId = ctx.intPart(1);
+        messenger.edit(ctx.chatId(), ctx.messageId(),
+                ToolsView.confirmTransferText(tools.find(toolId).orElse(null)),
+                ToolsView.confirmTransferKeyboard(toolId));
+    }
+
+    private void confirmTransferDelete(CallbackContext ctx) {
+        int toolId = ctx.intPart(1);
+        String res = safely(() -> tools.deletePermanently(toolId)
+                        .map(ToolsView::transferredOut)
+                        .orElse(ToolsView.NOT_FOUND),
+                ToolsView.ERR_DELETE);
+        editPanel(ctx, res);
     }
 
     private void showStockUnitsForWriteOff(CallbackContext ctx) {

@@ -163,4 +163,9 @@ public final class ToolRepository {
     public java.util.Optional<String> findStatus(int toolId) {
         return db.queryOne("SELECT status FROM tools WHERE id = ?", rs -> rs.getString("status"), toolId);
     }
+
+    /** Полностью удаляет инструмент из базы (при передаче по накладной в другое подразделение). */
+    public int deleteById(int toolId) {
+        return db.update("DELETE FROM tools WHERE id = ?", toolId);
+    }
 }

@@ -88,6 +88,9 @@ public final class AdminModule implements BotModule {
                 messenger.edit(ctx.chatId(), ctx.messageId(), AdminView.CLEAR_STOCK_CONFIRM_TEXT, AdminView.clearStockConfirmKeyboard()));
         r.onCallback("ADM_CLR_STOCK_YES").beforeBindCheck().adminOnly().handle(this::clearStockFromPanel);
         r.onCallback("ADM_PANEL_FIX_REQ").beforeBindCheck().adminOnly().handle(this::fixRequestsFromPanel);
+        r.onCallback("ADM_PANEL_CLR_REP").beforeBindCheck().adminOnly().handle(ctx ->
+                messenger.edit(ctx.chatId(), ctx.messageId(), AdminView.CLEAR_REPORT_CONFIRM_TEXT, AdminView.clearReportConfirmKeyboard()));
+        r.onCallback("ADM_CLR_REP_YES").beforeBindCheck().adminOnly().handle(this::clearReportFromPanel);
 
         // Новые пользователи и привязка к фамилии
         r.onCallbackPrefix("NEW_USER_APP:").adminOnly().handle(this::approveUser);
@@ -164,6 +167,21 @@ public final class AdminModule implements BotModule {
             return;
         }
         messenger.edit(ctx.chatId(), ctx.messageId(), "🧹 <b>База склада полностью очищена!</b>\nТеперь вы можете загрузить свежую ведомость.",
+                AdminView.backTo("🔙 Назад", AdminView.PANEL_MAIN));
+    }
+
+    private void clearReportFromPanel(CallbackContext ctx) {
+        int deleted;
+        try {
+            deleted = admin.clearMonthlyReportHistory();
+        } catch (RuntimeException e) {
+            log.error("Ошибка очистки отчета за месяц", e);
+            messenger.edit(ctx.chatId(), ctx.messageId(), "❌ Ошибка очистки истории отчета: " + Html.esc(String.valueOf(e.getMessage())),
+                    AdminView.backTo("🔙 Назад", AdminView.PANEL_MAIN));
+            return;
+        }
+        messenger.edit(ctx.chatId(), ctx.messageId(),
+                "🧹 <b>История списаний успешно очищена!</b>\nУдалено записей: <b>" + deleted + "</b>.\n\nТеперь отчет за новый месяц будет формироваться с чистого листа.",
                 AdminView.backTo("🔙 Назад", AdminView.PANEL_MAIN));
     }
 

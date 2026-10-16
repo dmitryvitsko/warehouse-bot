@@ -30,4 +30,6 @@ public interface StockFacade {
 
     /** Загрузка оборотной ведомости; возвращает HTML-отчёт для администратора. */
     String importTurnover(File file);
+
+    int clearTransactionsHistory();
 }

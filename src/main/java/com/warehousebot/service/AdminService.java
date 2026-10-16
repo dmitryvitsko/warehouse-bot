@@ -159,4 +159,9 @@ public final class AdminService {
     public void clearWarehouse() {
         stock.clearWarehouse();
     }
+
+    /** Очистка истории транзакций для формирования отчета нового месяца. */
+    public int clearMonthlyReportHistory() {
+        return stock.clearTransactionsHistory();
+    }
 }

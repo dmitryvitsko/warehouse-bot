@@ -72,22 +72,53 @@ final class WarehouseView {
         return new Screen(sb.toString(), rows.build());
     }
 
-    /** Карточка материала: выбор количества кнопкой или вводом в чат. */
+    /** Карточка материала: обычная или в режиме принудительной выдачи выбранному сотруднику. */
     static Screen card(Material m, int page, String alert) {
+        return card(m, page, alert, false, null);
+    }
+
+    static Screen card(Material m, int page, String alert, boolean isAdmin, String targetWorkerName) {
         StringBuilder sb = new StringBuilder();
         if (alert != null) sb.append(alert).append("\n\n").append(SEPARATOR).append("\n");
         String unit = Html.esc(m.unit());
+
+        if (targetWorkerName != null) {
+            sb.append("👷‍♂️ <b>ПРИНУДИТЕЛЬНАЯ ВЫДАЧА СОТРУДНИКУ: ").append(Html.esc(targetWorkerName)).append("</b>\n\n");
+        }
+
         sb.append(String.format("📦 <b>%s</b>\n\n• На складе: <b>%s %s</b>\n• Цена с НДС: <b>%s руб.</b>\n\n✍️ <b>Напишите количество (%s) в чат</b> ИЛИ выберите кнопкой:",
                 Html.esc(m.name()), qty(m.warehouseQty()), unit, price(m.priceWithVat()), unit));
 
         String prefix = "WH_TAKE:" + m.id() + ":";
-        InlineKeyboardMarkup markup = Keyboards.of(
-                row(btn("1", prefix + "1:" + page), btn("2", prefix + "2:" + page), btn("3", prefix + "3:" + page),
-                        btn("4", prefix + "4:" + page), btn("5", prefix + "5:" + page)),
-                row(btn("10", prefix + "10:" + page), btn("15", prefix + "15:" + page),
-                        btn("20", prefix + "20:" + page), btn("50", prefix + "50:" + page)),
-                row(btn("🔙 Назад к списку", "WH_PAGE:" + page)));
-        return new Screen(sb.toString(), markup);
+        Keyboards.Rows rows = Keyboards.rows();
+        rows.addRow(row(btn("1", prefix + "1:" + page), btn("2", prefix + "2:" + page), btn("3", prefix + "3:" + page),
+                btn("4", prefix + "4:" + page), btn("5", prefix + "5:" + page)));
+        rows.addRow(row(btn("10", prefix + "10:" + page), btn("15", prefix + "15:" + page),
+                btn("20", prefix + "20:" + page), btn("50", prefix + "50:" + page)));
+
+        if (isAdmin && targetWorkerName == null) {
+            rows.add(btn("👷‍♂️ Выдать сотруднику (принудительно)", "WH_F_USR:" + m.id() + ":" + page));
+        }
+        if (targetWorkerName != null) {
+            rows.add(btn("🔄 Сменить сотрудника", "WH_F_USR:" + m.id() + ":" + page));
+        }
+
+        rows.add(btn("🔙 Назад к списку", "WH_PAGE:" + page));
+        return new Screen(sb.toString(), rows.build());
+    }
+
+    /** Список сотрудников для принудительной выдачи материала со склада. */
+    static Screen forceUsersMenu(Material m, int page, List<com.warehousebot.domain.ActiveUser> users) {
+        String text = "👷‍♂️ <b>Принудительная выдача материала:</b>\n"
+                + "📦 <b>" + Html.esc(m.name()) + "</b> (доступно: " + qty(m.warehouseQty()) + " " + Html.esc(m.unit()) + ")\n\n"
+                + "👇 Выберите сотрудника, которому нужно записать материал в подотчет:";
+        Keyboards.Rows rows = Keyboards.rows();
+        for (com.warehousebot.domain.ActiveUser u : users) {
+            String icon = u.role().isAdmin() ? "👑 " : "👷‍♂️ ";
+            rows.add(btn(icon + u.fullName(), "WH_F_SEL:" + m.id() + ":" + page + ":" + u.id()));
+        }
+        rows.add(btn("🔙 Назад к материалу", "WH_ITEM:" + m.id() + ":" + page));
+        return new Screen(text, rows.build());
     }
 
     /** Ввод количества для материала, выбранного кнопкой TAKE_MAT (старые сообщения со списком склада). */

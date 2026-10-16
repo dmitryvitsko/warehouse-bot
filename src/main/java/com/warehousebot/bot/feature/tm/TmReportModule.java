@@ -1,5 +1,6 @@
 package com.warehousebot.bot.feature.tm;
 
+import com.warehousebot.bot.common.Ui;
 import com.warehousebot.bot.core.BotModule;
 import com.warehousebot.bot.core.CallbackContext;
 import com.warehousebot.bot.core.Keyboards;
@@ -10,9 +11,11 @@ import com.warehousebot.bot.core.TextStage;
 import com.warehousebot.bot.session.SessionKey;
 import com.warehousebot.domain.HeldMaterial;
 import com.warehousebot.domain.WriteOffItem;
+import com.warehousebot.repository.UserRepository;
 import com.warehousebot.service.StockFacade;
 import com.warehousebot.service.TmService;
 import com.warehousebot.util.Formats;
+import com.warehousebot.util.Html;
 import org.telegram.telegrambots.meta.api.objects.replykeyboard.InlineKeyboardMarkup;
 
 import java.util.ArrayList;
@@ -30,12 +33,17 @@ public final class TmReportModule implements BotModule {
     private static final SessionKey<TmReportSession> REPORT = SessionKey.dialog("tm.report");
 
     private final Messenger messenger;
+    private final Ui ui;
+    private final UserRepository users;
     private final TmService tm;
     private final StockFacade stock;
     private final TmModule tasks;
 
-    public TmReportModule(Messenger messenger, TmService tm, StockFacade stock, TmModule tasks) {
+    public TmReportModule(Messenger messenger, Ui ui, UserRepository users,
+                          TmService tm, StockFacade stock, TmModule tasks) {
         this.messenger = messenger;
+        this.ui = ui;
+        this.users = users;
         this.tm = tm;
         this.stock = stock;
         this.tasks = tasks;
@@ -275,11 +283,23 @@ public final class TmReportModule implements BotModule {
         boolean sentToTm = tm.performTask(chatId, s.taskId, tmText);
 
         List<String> failed = new ArrayList<>();
+        StringBuilder writtenOffReport = new StringBuilder();
         for (TmReportSession.UsedMaterial m : s.usedMaterials) {
             WriteOffItem item = new WriteOffItem(m.materialId(), m.name(), m.unit(), m.priceWithVat(), m.quantity(),
                     s.hasReceipt, s.receiptNumber, "-", "-", "-", s.closingCode, "Закрытие заявки ТМ #" + s.taskId);
             String result = stock.writeOff(chatId, item);
-            if (result != null && result.startsWith("❌")) failed.add(result);
+            if (result != null && result.startsWith("❌")) {
+                failed.add(result);
+            } else if (result != null) {
+                writtenOffReport.append(result).append("\n\n");
+            }
+        }
+
+        if (!ctx.isAdmin() && !writtenOffReport.isEmpty()) {
+            String workerName = users.displayName(chatId);
+            ui.notifyAdmins(chatId, "🔔 <b>ВНИМАНИЕ! Списание при закрытии заявки ТМ #" + Html.esc(s.taskId) + ":</b>\n"
+                    + "👷‍♂️ Сотрудник: <b>" + Html.esc(workerName) + "</b>\n\n"
+                    + writtenOffReport.toString().trim());
         }
 
         updateUi(chatId, s, TmView.sendResultText(s.taskId, tmText, sentToTm, failed), TmView.backToTasksKeyboard());

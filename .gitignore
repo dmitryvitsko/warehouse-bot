@@ -49,3 +49,7 @@ config.properties
 target/
 .idea/
 *.iml
+
+*.bak
+backup_*.db
+warehouse.db

@@ -227,8 +227,9 @@ public final class WriteOffModule implements BotModule {
                     cart.contractNumber, cart.address, closingCode, reason))).append("\n");
         }
         if (!ctx.isAdmin()) {
-            ui.notifyAdmins(ctx.chatId(), "🔔 <b>ВНИМАНИЕ! Списание:</b>\nМастер <b>" + Html.esc(ctx.firstName())
-                    + "</b> выполнил техническое списание:\n\n" + result);
+            String workerName = users.displayName(ctx.chatId());
+            ui.notifyAdmins(ctx.chatId(), "🔔 <b>ВНИМАНИЕ! Техническое списание:</b>\n"
+                    + "👷‍♂️ Сотрудник: <b>" + Html.esc(workerName) + "</b>\n\n" + result);
         }
         showMenu(ctx.session(), ctx.chatId(), ctx.messageId(), result.toString().trim());
     }
@@ -240,7 +241,11 @@ public final class WriteOffModule implements BotModule {
                     cart.contractNumber, cart.address, "102", "Списание по квитанции"))).append("\n");
         }
         ctx.session().remove(WRITE_OFF_CART);
-        if (!ctx.isAdmin()) ui.notifyAdmins(ctx.chatId(), "🧾 <b>ВНИМАНИЕ! Выбита квитанция:</b>\n" + result);
+        if (!ctx.isAdmin()) {
+            String workerName = users.displayName(ctx.chatId());
+            ui.notifyAdmins(ctx.chatId(), "🧾 <b>ВНИМАНИЕ! Списание по квитанции:</b>\n"
+                    + "👷‍♂️ Сотрудник: <b>" + Html.esc(workerName) + "</b>\n\n" + result);
+        }
         showMenu(ctx.session(), ctx.chatId(), cart.anchorMsgId, result.toString().trim());
     }
 

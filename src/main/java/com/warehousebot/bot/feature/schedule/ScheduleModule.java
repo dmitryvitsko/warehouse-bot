@@ -270,7 +270,8 @@ public final class ScheduleModule implements BotModule {
         if (target == null) return false;
         Integer anchorId = target.anchorId();
 
-        Optional<List<LocalDate>> parsed = DateInputParser.parse(ctx.trimmed(), LocalDate.now());
+        Optional<DateInputParser.ParsedScheduleInput> parsed =
+                DateInputParser.parseWithOptionalTime(ctx.trimmed(), LocalDate.now());
         if (parsed.isEmpty()) {
             ctx.session().put(EDIT_USER, target);
             if (anchorId != null) {
@@ -279,7 +280,18 @@ public final class ScheduleModule implements BotModule {
             return true;
         }
 
-        List<LocalDate> dates = parsed.get();
+        DateInputParser.ParsedScheduleInput input = parsed.get();
+        List<LocalDate> dates = input.dates();
+
+        // Если вместе с датой сразу ввели время (например: "17.10 8:30-16:15" или "17.10-21.10 08:30-17:30") —
+        // применяем смену мгновенно без показа кнопок!
+        if (input.hasTime()) {
+            String timeLabel = input.startTime() + "-" + input.endTime();
+            saveAndNotifyShift(ctx.chatId(), ctx.role(), target.excelName(), dates,
+                    "", input.startTime(), input.endTime(), timeLabel, anchorId);
+            return true;
+        }
+
         String displayDate = dates.size() == 1
                 ? dates.get(0).format(DATE) : "выбранные дни (" + dates.size() + " шт.)";
         ctx.session().put(EDIT_DATES, new PendingEdit(target.excelName(), dates, anchorId));
@@ -310,25 +322,32 @@ public final class ScheduleModule implements BotModule {
             end = times[1];
         }
 
+        String shiftLabel = statusCode.isEmpty() ? payload : statusCode;
+        if (saveAndNotifyShift(ctx.chatId(), ctx.role(), edit.excelName(), edit.dates(),
+                statusCode, start, end, shiftLabel, anchorId)) {
+            ctx.answer(ScheduleView.EDIT_SAVED, false);
+        }
+    }
+
+    private boolean saveAndNotifyShift(long chatId, Role role, String excelName, List<LocalDate> dates,
+                                       String statusCode, String start, String end, String shiftLabel, Integer anchorId) {
         try {
-            schedule.setShifts(edit.excelName(), edit.dates(), statusCode, start, end);
+            schedule.setShifts(excelName, dates, statusCode, start, end);
         } catch (DataAccessException e) {
             log.error("Изменение графика", e);
-            menu.show(ctx.chatId(), ctx.role(), ScheduleView.EDIT_SAVE_ERROR);
-            return;
+            menu.show(chatId, role, ScheduleView.EDIT_SAVE_ERROR);
+            return false;
         }
 
         // Окно графика показывает месяц первой изменённой даты.
-        LocalDate first = edit.dates().get(0);
-        showSchedule(ctx.chatId(), edit.excelName(), first.getYear(), first.getMonthValue(), false, anchorId);
+        LocalDate first = dates.get(0);
+        showSchedule(chatId, excelName, first.getYear(), first.getMonthValue(), false, anchorId);
 
         List<String> dateStrings = new ArrayList<>();
-        for (LocalDate d : edit.dates()) dateStrings.add(d.format(DATE));
-        String datesText = dateStrings.size() > 2 ? dateStrings.size() + " дн." : String.join(",", dateStrings);
-        String shift = statusCode.isEmpty() ? payload : statusCode;
-        users.findUserIdByExcelName(edit.excelName())
-                .ifPresent(id -> ui.notify(id, ScheduleView.shiftChangedNotice(datesText, shift)));
-
-        ctx.answer(ScheduleView.EDIT_SAVED, false);
+        for (LocalDate d : dates) dateStrings.add(d.format(DATE));
+        String datesText = dateStrings.size() > 2 ? dateStrings.size() + " дн." : String.join(", ", dateStrings);
+        users.findUserIdByExcelName(excelName)
+                .ifPresent(id -> ui.notify(id, ScheduleView.shiftChangedNotice(datesText, shiftLabel)));
+        return true;
     }
 }

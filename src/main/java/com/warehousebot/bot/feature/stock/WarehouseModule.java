@@ -10,10 +10,12 @@ import com.warehousebot.bot.core.TextContext;
 import com.warehousebot.bot.core.TextStage;
 import com.warehousebot.bot.feature.stock.StockSessions.Screen;
 import com.warehousebot.bot.feature.stock.StockSessions.WhTake;
+import com.warehousebot.bot.session.SessionKey;
 import com.warehousebot.bot.session.UserSession;
 import com.warehousebot.domain.Material;
 import com.warehousebot.domain.Role;
 import com.warehousebot.infrastructure.mail.EmailSender;
+import com.warehousebot.repository.UserRepository;
 import com.warehousebot.service.ReportService;
 import com.warehousebot.service.StockService;
 import com.warehousebot.service.StockService.TakeResult;
@@ -27,21 +29,26 @@ import static com.warehousebot.bot.feature.stock.StockSessions.WAITING_TAKE_MATE
 import static com.warehousebot.bot.feature.stock.StockSessions.WAREHOUSE_TAKE;
 import static com.warehousebot.bot.feature.stock.StockSessions.WRITE_OFF_CART;
 
-/** «📦 Склад»: каталог, выдача материала в подотчёт; для администратора — остатки у сотрудников и отчёт. */
+/** «📦 Склад»: каталог, выдача материала в подотчёт; для администратора — принудительная выдача, остатки и отчёт. */
 public final class WarehouseModule implements BotModule {
+
+    /** Если задано — карточка материала работает в режиме принудительной выдачи этому сотруднику. */
+    private static final SessionKey<Long> FORCE_TARGET_USER = SessionKey.dialog("stock.forceTargetUser");
 
     private final Messenger messenger;
     private final Ui ui;
     private final MainMenu menu;
+    private final UserRepository users;
     private final StockService stock;
     private final ReportService reports;
     private final EmailSender email;
 
-    public WarehouseModule(Messenger messenger, Ui ui, MainMenu menu, StockService stock, ReportService reports,
-                           EmailSender email) {
+    public WarehouseModule(Messenger messenger, Ui ui, MainMenu menu, UserRepository users,
+                           StockService stock, ReportService reports, EmailSender email) {
         this.messenger = messenger;
         this.ui = ui;
         this.menu = menu;
+        this.users = users;
         this.stock = stock;
         this.reports = reports;
         this.email = email;
@@ -49,7 +56,10 @@ public final class WarehouseModule implements BotModule {
 
     @Override
     public void register(Routes r) {
-        r.onCommand(MainMenu.WAREHOUSE, ctx -> showPage(ctx.chatId(), 1, null, null));
+        r.onCommand(MainMenu.WAREHOUSE, ctx -> {
+            ctx.session().remove(FORCE_TARGET_USER);
+            showPage(ctx.chatId(), 1, null, null);
+        });
         r.onCommand(MainMenu.ADMIN_BALANCES, ctx -> {
             if (ctx.isAdmin()) ui.closable(ctx.chatId(), WarehouseView.allBalancesText(stock.allHoldings()));
         });
@@ -59,8 +69,12 @@ public final class WarehouseModule implements BotModule {
 
         // Каталог склада доступен и мастеру, ещё не выбравшему фамилию (как раньше).
         r.onCallbackPrefix("WH_PAGE:").beforeBindCheck().handle(this::onPage);
-        r.onCallbackPrefix("WH_ITEM:").beforeBindCheck().handle(ctx ->
-                showCard(ctx.session(), ctx.chatId(), ctx.intPart(1), ctx.intPart(2), ctx.messageId(), null));
+        r.onCallbackPrefix("WH_ITEM:").beforeBindCheck().handle(ctx -> {
+            ctx.session().remove(FORCE_TARGET_USER);
+            showCard(ctx.session(), ctx.chatId(), ctx.role(), ctx.intPart(1), ctx.intPart(2), ctx.messageId(), null);
+        });
+        r.onCallbackPrefix("WH_F_USR:").beforeBindCheck().adminOnly().handle(this::onSelectForceUserMenu);
+        r.onCallbackPrefix("WH_F_SEL:").beforeBindCheck().adminOnly().handle(this::onSelectForceUser);
         r.onCallbackPrefix("WH_TAKE:").beforeBindCheck().handle(this::onQuickTake);
         r.onCallback("WH_CLOSE").beforeBindCheck().handle(this::onClose);
 
@@ -78,21 +92,47 @@ public final class WarehouseModule implements BotModule {
         messenger.sendOrEdit(chatId, messageId, s.html(), s.markup());
     }
 
-    private void showCard(UserSession session, long chatId, int materialId, int page, int messageId, String alert) {
+    private void showCard(UserSession session, long chatId, Role role, int materialId, int page, int messageId, String alert) {
         Optional<Material> material = stock.availableMaterial(materialId);
         if (material.isEmpty()) {
             session.remove(WAREHOUSE_TAKE);
+            session.remove(FORCE_TARGET_USER);
             showPage(chatId, page, messageId, "❌ Материал закончился на складе.");
             return;
         }
         session.put(WAREHOUSE_TAKE, new WhTake(materialId, page, messageId));
-        Screen s = WarehouseView.card(material.get(), page, alert);
+        Long targetUserId = session.get(FORCE_TARGET_USER);
+        String targetName = targetUserId != null ? users.displayName(targetUserId) : null;
+
+        Screen s = WarehouseView.card(material.get(), page, alert, role.isAdmin(), targetName);
         messenger.edit(chatId, messageId, s.html(), s.markup());
+    }
+
+    private void onSelectForceUserMenu(CallbackContext ctx) {
+        int materialId = ctx.intPart(1);
+        int page = ctx.intPart(2);
+        Optional<Material> material = stock.availableMaterial(materialId);
+        if (material.isEmpty()) {
+            showPage(ctx.chatId(), page, ctx.messageId(), "❌ Материал закончился на складе.");
+            return;
+        }
+        ctx.session().remove(WAREHOUSE_TAKE);
+        Screen s = WarehouseView.forceUsersMenu(material.get(), page, users.activeUsers());
+        messenger.edit(ctx.chatId(), ctx.messageId(), s.html(), s.markup());
+    }
+
+    private void onSelectForceUser(CallbackContext ctx) {
+        int materialId = ctx.intPart(1);
+        int page = ctx.intPart(2);
+        long targetUserId = ctx.longPart(3);
+        ctx.session().put(FORCE_TARGET_USER, targetUserId);
+        showCard(ctx.session(), ctx.chatId(), ctx.role(), materialId, page, ctx.messageId(), null);
     }
 
     private void onPage(CallbackContext ctx) {
         ctx.session().remove(WAITING_TAKE_MATERIAL);
         ctx.session().remove(WAREHOUSE_TAKE);
+        ctx.session().remove(FORCE_TARGET_USER);
         showPage(ctx.chatId(), ctx.intPart(1), ctx.messageId(), null);
     }
 
@@ -102,12 +142,13 @@ public final class WarehouseModule implements BotModule {
         double qty = Double.parseDouble(ctx.part(2));
         int page = ctx.intPart(3);
 
-        TakeResult result = stock.take(ctx.chatId(), materialId, qty);
+        TakeResult result = executeTakeOrForce(ctx.session(), ctx.chatId(), materialId, qty);
         if (result.ok()) {
             ctx.session().remove(WAREHOUSE_TAKE);
+            ctx.session().remove(FORCE_TARGET_USER);
             showPage(ctx.chatId(), page, ctx.messageId(), result.text());
         } else {
-            showCard(ctx.session(), ctx.chatId(), materialId, page, ctx.messageId(), result.text());
+            showCard(ctx.session(), ctx.chatId(), ctx.role(), materialId, page, ctx.messageId(), result.text());
         }
         ctx.answer(result.ok() ? "✅ Добавлено в подотчет." : "❌ Недостаточно на складе", !result.ok());
     }
@@ -115,6 +156,7 @@ public final class WarehouseModule implements BotModule {
     private void onClose(CallbackContext ctx) {
         ctx.session().remove(WAITING_TAKE_MATERIAL);
         ctx.session().remove(WAREHOUSE_TAKE);
+        ctx.session().remove(FORCE_TARGET_USER);
         messenger.delete(ctx.chatId(), ctx.messageId());
     }
 
@@ -127,18 +169,40 @@ public final class WarehouseModule implements BotModule {
             qty = Formats.parseUserNumber(ctx.text());
             if (qty <= 0) throw new NumberFormatException();
         } catch (NumberFormatException e) {
-            showCard(ctx.session(), ctx.chatId(), take.materialId(), take.page(), take.anchorMsgId(),
+            showCard(ctx.session(), ctx.chatId(), ctx.role(), take.materialId(), take.page(), take.anchorMsgId(),
                     "❌ Введите число больше нуля (например: <code>5</code> или <code>0.5</code>).");
             return true;
         }
-        TakeResult result = stock.take(ctx.chatId(), take.materialId(), qty);
+        TakeResult result = executeTakeOrForce(ctx.session(), ctx.chatId(), take.materialId(), qty);
         if (result.ok()) {
             ctx.session().remove(WAREHOUSE_TAKE);
+            ctx.session().remove(FORCE_TARGET_USER);
             showPage(ctx.chatId(), take.page(), take.anchorMsgId(), result.text());
         } else {
-            showCard(ctx.session(), ctx.chatId(), take.materialId(), take.page(), take.anchorMsgId(), result.text());
+            showCard(ctx.session(), ctx.chatId(), ctx.role(), take.materialId(), take.page(), take.anchorMsgId(), result.text());
         }
         return true;
+    }
+
+    /** Выполняет либо обычное взятие себе, либо принудительную выдачу выбранному сотруднику с уведомлением. */
+    private TakeResult executeTakeOrForce(UserSession session, long chatId, int materialId, double qty) {
+        Long targetUserId = session.get(FORCE_TARGET_USER);
+        if (targetUserId == null) {
+            return stock.take(chatId, materialId, qty);
+        }
+        String targetName = users.displayName(targetUserId);
+        Optional<Material> mat = stock.availableMaterial(materialId);
+        TakeResult res = stock.forceAssign(targetUserId, targetName, materialId, qty);
+        if (res.ok() && targetUserId != chatId && mat.isPresent()) {
+            Material m = mat.get();
+            ui.notify(targetUserId, String.format("""
+                            🔔 <b>Администратор выдал вам материал в подотчет:</b>
+                            • Наименование: <b>%s</b>
+                            • Инв. номер: <code>%s</code>
+                            • Количество: <b>%s %s</b>""",
+                    Html.esc(m.name()), Html.esc(m.code()), Formats.qty(qty), Html.esc(m.unit())));
+        }
+        return res;
     }
 
     // ------------------------------------------------------------------ старый список склада (TAKE_MAT / TAKE_Q)
@@ -158,7 +222,6 @@ public final class WarehouseModule implements BotModule {
         try {
             takeAndReport(ctx.session(), ctx.chatId(), ctx.role(), materialId, Double.parseDouble(ctx.part(1)));
         } catch (Exception ignored) {
-            // испорченные данные кнопки — молча, как и раньше
         }
     }
 

@@ -83,8 +83,40 @@ final class ToolsView {
                 row(btn("📊 Общая сводка", "tool_menu_audit"), btn("👤 Сводка по людям", "tool_menu_audit_users")),
                 row(btn("📤 Выдать", "tool_menu_give"), btn("📥 Вернуть", "tool_menu_return")),
                 row(btn("🗑 Списать", "tool_menu_writeoff"), btn("♻️ Восстановить", "tool_menu_restore")),
+                row(btn("📦 Передать (Удалить из базы)", "tool_menu_transfer")),
                 row(btn("🗄 Архив", "tool_menu_archive"), btn("📢 Рассылка: Аудит", "tool_menu_notify")),
                 row(btn("❌ Закрыть панель", "tool_menu_close")));
+    }
+
+    static final String ERR_DELETE = "❌ Ошибка БД при удалении инструмента.";
+
+    static InlineKeyboardMarkup transferLocationKeyboard() {
+        return Keyboards.of(
+                row(btn("📦 Со склада", "T_TR_LOC:STOCK"), btn("👤 У сотрудника", "T_TR_LOC:ASSIGNED")),
+                row(btn("🔙 Назад", "tool_menu_main")));
+    }
+
+    static InlineKeyboardMarkup groupsForTransfer(List<ToolGroup> groups) {
+        Keyboards.Rows rows = Keyboards.rows();
+        for (ToolGroup g : groups) rows.add(btn(Formats.cut(g.name(), 30) + " (" + g.count() + " шт)", "T_TR_G:" + g.firstId()));
+        return rows.add(btn("🔙 Назад", "tool_menu_transfer")).build();
+    }
+
+    static String confirmTransferText(Tool tool) {
+        return "⚠️ <b>Подтверждение передачи по накладной</b>\n\n"
+                + "Выбран инструмент: <b>" + nameAndInv(tool) + "</b>\n\n"
+                + "Он будет <b>полностью удален из вашей базы инструмента</b> (без помещения в архив). Продолжить?";
+    }
+
+    static InlineKeyboardMarkup confirmTransferKeyboard(int toolId) {
+        return Keyboards.of(
+                row(btn("🔥 Да, удалить из базы", "T_TR_YES:" + toolId)),
+                row(btn("🔙 Отмена", "tool_menu_transfer")));
+    }
+
+    static String transferredOut(Tool tool) {
+        return String.format("✅ <b>Инструмент передан и удален из базы!</b>\n\n🪛 <b>%s</b>\n🔢 Инв. №: <code>%s</code>",
+                h(tool.name()), h(tool.invNumber()));
     }
 
     static InlineKeyboardMarkup backToPanel() {
